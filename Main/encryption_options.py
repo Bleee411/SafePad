@@ -22,7 +22,6 @@ class EncryptionHandler:
         self.supported_levels = ["low", "normal", "high"] 
 
     def fix_key(self, key):
-        """Normalize key input into raw bytes"""
         if isinstance(key, str):
             try:
                 return b64decode(key)
@@ -33,7 +32,6 @@ class EncryptionHandler:
         return key
 
     def generate_key(self, password, salt):
-        """Generate encryption key with Argon2ID using parameters from __init__"""
         
         level_params = self.argon2_params 
         
@@ -50,31 +48,26 @@ class EncryptionHandler:
         return argon2_hash
 
     def encrypt_data(self, key, nonce, data):
-        """Encrypt data with proper key handling for all levels using AEAD."""
         key = self.fix_key(key)
 
         aesgcm = AESGCM(key)
         return aesgcm.encrypt(nonce, data, None)  
 
     def decrypt_data(self, key, nonce, encrypted_data):
-        """Decrypt data with proper key handling for all levels using AEAD."""
         key = self.fix_key(key)
 
         aesgcm = AESGCM(key)
         return aesgcm.decrypt(nonce, encrypted_data, None)
 
     def get_nonce_size(self):
-        """Get nonce size for GCM (96 bits recommended)"""
         return 12  # 96 bits for GCM
 
     def get_salt_size(self):
-        """Get salt size for Argon2"""
         return 16  # 128-bit salt
 
     def get_key_size(self):
-        """Get required key size for current level"""
         return 32 
     def create_cipher(self, key, nonce):
-        """Create cipher based on encryption level - not used for AEAD"""
         raise NotImplementedError("AEAD mode doesn't use traditional cipher objects")
+
 
