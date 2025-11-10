@@ -78,5 +78,13 @@ Po pobraniu skompilowanej wersji z sekcji "Releases":
 
 Ten projekt jest udostępniany na licencji [MIT](https://choosealicense.com/licenses/mit/) - zobacz plik `LICENSE`, aby uzyskać szczegółowe informacje.
 
+## Disclaimer
+
+> **Uwaga:**  
+> Ten projekt SafePad (autorstwa szofer) jest niezależnym notatnikiem szyfrującym  
+> napisanym w Pythonie na licencji MIT.  
+> Nie jest powiązany z żadnym innym projektem o tej samej nazwie.
+
+
 
 
