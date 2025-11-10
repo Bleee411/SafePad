@@ -34,7 +34,7 @@
 ### Uruchamianie (Windows)
 1.Pobierz SafePad-2.0.0.exe z:
 
-[tu będzie link](https://github.com/Bleee411)
+[Wersja Stabilna V2.0.0](https://github.com/Bleee411/SafePad/releases/tag/Stable)
 
 2.Otwórz SafePad-2.0.0.exe i gotowe
 
