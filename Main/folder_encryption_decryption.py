@@ -84,7 +84,6 @@ class FolderCrypto:
                 pass
 
     def decrypt_folder(self, encrypted_path, output_folder, progress_callback=None, status_callback=None):
-        """Odszyfrowuje folder z lepszym raportowaniem postępu."""
         
         def update_status(message):
             if status_callback:
@@ -157,3 +156,4 @@ class FolderCrypto:
             except:
 
                 pass
+
