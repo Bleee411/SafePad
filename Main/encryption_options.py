@@ -15,16 +15,14 @@ ENCRYPTION_VERSION = "V2.0"
 
 class EncryptionHandler:
     def __init__(self, argon2_params):
-        # ZMIANA: Przyjmujemy słownik z parametrami, a nie 'level'
         if not isinstance(argon2_params, dict) or not all(k in argon2_params for k in ["m", "t", "p"]):
             raise ValueError(f"Nieprawidłowe parametry Argon2. Oczekiwano słownika z kluczami 'm', 't', 'p'. Otrzymano: {argon2_params}")
         
-        self.argon2_params = argon2_params # ZMIANA: Zapisz parametry
-        self.supported_levels = ["low", "normal", "high"] # Może zostać dla kompatybilności
+        self.argon2_params = argon2_params 
+        self.supported_levels = ["low", "normal", "high"] 
 
     def fix_key(self, key):
         """Normalize key input into raw bytes"""
-        # ... (ta funkcja zostaje bez zmian) ...
         if isinstance(key, str):
             try:
                 return b64decode(key)
@@ -36,12 +34,9 @@ class EncryptionHandler:
 
     def generate_key(self, password, salt):
         """Generate encryption key with Argon2ID using parameters from __init__"""
-        # ZMIANA: Usuń stary, hardkodowany słownik 'params'
         
-        # ZMIANA: Użyj parametrów przekazanych w __init__
         level_params = self.argon2_params 
         
-        # Use low-level Argon2 API to directly hash with our salt
         argon2_hash = argon2.low_level.hash_secret_raw(
             secret=password.encode(),
             salt=salt,
@@ -82,3 +77,4 @@ class EncryptionHandler:
     def create_cipher(self, key, nonce):
         """Create cipher based on encryption level - not used for AEAD"""
         raise NotImplementedError("AEAD mode doesn't use traditional cipher objects")
+
