@@ -37,7 +37,6 @@
 ## 🌍 Platformy
 - 🪟 Windows — pełne wsparcie  
 - 🐧 Linux — wkrótce dostępne  
-- 🍎 macOS — planowane w przyszłości 
 
 
 
