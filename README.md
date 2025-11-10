@@ -71,8 +71,8 @@ Po pobraniu skompilowanej wersji z sekcji "Releases":
     
 ## Screenshots
 
-![Ekran główny](https://via.placeholder.com/468x300?text=App+Screenshot+Here)
-![Ustawienia](https://via.placeholder.com/468x300?text=App+Screenshot+Here)
+![Ekran główny](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124341.png)
+![Ustawienia](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124355.png)
 
 ## Licencja
 
