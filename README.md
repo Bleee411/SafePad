@@ -1,6 +1,16 @@
 
 # SafePad 🔒
 
+--------------
+
+![License: MIT](https://img.shields.io/badge/MIT-green?style=for-the-badge)
+![Python](https://img.shields.io/badge/Python-FFD43B?style=for-the-badge&logo=python&logoColor=blue)
+![Platform](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
+![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge)
+
+--------------
+
 **SafePad** to bezpieczny, szyfrowany edytor tekstu napisany w Pythonie przy użyciu biblioteki PyQt6. Aplikacja przechowuje Twoje notatki w zaszyfrowanym formacie, używając nowoczesnych algorytmów kryptograficznych, aby zapewnić ich prywatność.
 
 ## Kluczowe Funkcje
@@ -16,8 +26,6 @@
 
 
 
-
-
 ## Stos Technologiczny
 
 * **Framework GUI:** PyQt6
@@ -25,6 +33,11 @@
 * **Obsługa Obrazów:** `Pillow` 
 * **System Aktualizacji:** `PyUpdater`
 * **Kompilacja:** `PyInstaller`
+
+## 🌍 Platformy
+- 🪟 Windows — pełne wsparcie  
+- 🐧 Linux — wkrótce dostępne  
+- 🍎 macOS — planowane w przyszłości 
 
 
 
