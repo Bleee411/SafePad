@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 ##########################################################
 #                                                        # 
 #           Program oraz kod autorstwa Szofer            #
@@ -35,7 +36,6 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.padding import PKCS7
-from pyserpent import Serpent
 from encryption_options import EncryptionHandler, ENCRYPTION_VERSION
 from folder_encryption_decryption import FolderCrypto
 
@@ -258,23 +258,6 @@ class SafePadApp(QMainWindow):
         select_all_action.triggered.connect(self.text_edit.selectAll)
         edit_menu.addAction(select_all_action)
         
-        # View menu
-        view_menu = menubar.addMenu("Widok")
-        
-        zoom_in_action = QAction("Powiększ", self)
-        zoom_in_action.setShortcut("Ctrl++")
-        zoom_in_action.triggered.connect(self.zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction("Pomniejsz", self)
-        zoom_out_action.setShortcut("Ctrl+-")
-        zoom_out_action.triggered.connect(self.zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        reset_zoom_action = QAction("Resetuj powiększenie", self)
-        reset_zoom_action.setShortcut("Ctrl+0")
-        reset_zoom_action.triggered.connect(self.reset_zoom)
-        view_menu.addAction(reset_zoom_action)
         
         # Settings menu
         settings_menu = menubar.addMenu("Ustawienia")
@@ -719,7 +702,7 @@ class SafePadApp(QMainWindow):
             self.save_as_file()
 
     def save_as_file(self):
-        """Save file with new name"""
+        """Save file with new name with automatic .sscr extension"""
         try:
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "SafePad - Zapisz plik jako", "",
@@ -727,16 +710,172 @@ class SafePadApp(QMainWindow):
             )
             
             if file_path:
+                if not file_path.lower().endswith('.sscr'):
+                    file_path += '.sscr'
+                
                 self.current_file = file_path
                 self._save_current_file(file_path)
                 
         except Exception as e:
             QMessageBox.critical(self, "SafePad - Błąd", f"Nie udało się zapisać pliku: {str(e)}")
 
+    def _prompt_new_password_with_verification(self, for_folder=False):
+        """Prompt for new password with verification"""
+        while True:
+            title = "SafePad - Nowe hasło do folderu" if for_folder else "SafePad - Nowe hasło"
+            message = "Wpisz hasło do zaszyfrowania folderu:" if for_folder else "Wpisz hasło do zaszyfrowania pliku:"
+            
+            password, ok = QInputDialog.getText(
+                self, title, message,
+                QLineEdit.EchoMode.Password
+            )
+            if not ok or not password:
+                return None
+                
+            # Walidacja hasła
+            validation_error = self._validate_password(password)
+            if validation_error:
+                QMessageBox.critical(self, "SafePad - Błąd", validation_error)
+                continue
+                
+            confirm_title = "SafePad - Potwierdź hasło do folderu" if for_folder else "SafePad - Potwierdź hasło"
+            confirm_message = "Wpisz hasło ponownie, aby potwierdzić:" if for_folder else "Wpisz hasło ponownie, aby potwierdzić:"
+            
+            confirm_password, ok = QInputDialog.getText(
+                self, confirm_title, confirm_message,
+                QLineEdit.EchoMode.Password
+            )
+            if not ok:
+                return None
+                
+            if password == confirm_password:
+                return password
+            else:
+                QMessageBox.critical(self, "SafePad - Błąd", "Hasła nie są identyczne. Spróbuj ponownie.")
+
+    def _validate_password(self, password):
+        """Validate password against requirements"""
+        if len(password) < self.password_min_length:
+            return f"Hasło jest za krótkie. Wymagana minimalna długość to {self.password_min_length} znaków."
+            
+        if self.password_require_upper and not any(c.isupper() for c in password):
+            return "Hasło musi zawierać co najmniej jedną wielką literę (A-Z)."
+            
+        if self.password_require_lower and not any(c.islower() for c in password):
+            return "Hasło musi zawierać co najmniej jedną małą literę (a-z)."
+            
+        if self.password_require_number and not any(c.isdigit() for c in password):
+            return "Hasło musi zawierać co najmniej jedną cyfrę (0-9)."
+            
+        if self.password_require_special and not any(not c.isalnum() for c in password):
+            return "Hasło musi zawierać co najmniej jeden znak specjalny (!@#$%^&*(), etc.)."
+            
+        return None
+
+    def initiate_folder_encryption(self):
+        """Initiate folder encryption process with password validation"""
+        folder_path = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder do zaszyfrowania")
+        if not folder_path:
+            return
+            
+        # Automatycznie dodaj rozszerzenie .enc dla zaszyfrowanego folderu
+        default_name = os.path.basename(folder_path) + ".enc"
+        default_path = os.path.join(os.path.dirname(folder_path), default_name)
+        
+        output_path, _ = QFileDialog.getSaveFileName(
+            self, "SafePad - Zapisz zaszyfrowany folder jako", default_path,
+            "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
+        )
+        if not output_path:
+            return
+            
+        # Automatycznie dodaj rozszerzenie .enc jeśli nie ma
+        if not output_path.lower().endswith('.enc'):
+            output_path += '.enc'
+            
+        password = self._prompt_new_password_with_verification(for_folder=True)
+        if not password:
+            return
+            
+        # Sprawdź czy folder wyjściowy istnieje i zapytaj o nadpisanie
+        if os.path.exists(output_path):
+            reply = QMessageBox.question(
+                self, "SafePad - Potwierdzenie",
+                f"Plik {os.path.basename(output_path)} już istnieje. Czy chcesz go nadpisać?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+            
+        self.progress_dialog = self.create_progress_window("Szyfrowanie folderu...")
+        
+        current_argon2_params = self.settings["argon2_params"][self.encryption_level]
+
+        self.crypto_worker = FolderCryptoWorker(
+            "encrypt", password, current_argon2_params, folder_path, output_path, self
+        )
+        
+        self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
+        self.crypto_worker.progress.connect(self.progress_dialog.setValue)
+        self.crypto_worker.finished.connect(self.on_crypto_finished)
+        self.crypto_worker.error.connect(self.on_crypto_error)
+        self.progress_dialog.canceled.connect(self.cancel_crypto_worker)
+        
+        self.crypto_worker.start() 
+        self.progress_dialog.exec()
+
+    @pyqtSlot(str)
+    def on_crypto_finished(self, success_message):
+        """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
+        self.progress_dialog.close()
+        self.update_status(success_message)
+        QMessageBox.information(self, "SafePad - Sukces", success_message)
+
+    @pyqtSlot(str)
+    def on_crypto_error(self, error_message):
+        """Slot wywoływany w przypadku błędu w wątku."""
+        self.progress_dialog.close()
+        self.update_status("Błąd operacji na folderze", is_error=True)
+        QMessageBox.critical(self, "SafePad - Błąd", f"Wystąpił błąd: {error_message}")
+        
+    def decrypt_folder(self):
+        """Initiate folder decryption process"""
+        encrypted_path, _ = QFileDialog.getOpenFileName(
+            self, "SafePad - Wybierz zaszyfrowany folder", "",
+            "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
+        )
+        if not encrypted_path:
+            return
+            
+        output_folder = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder docelowy do odszyfrowania")
+        if not output_folder:
+            return
+            
+        password = self.prompt_password()
+        if not password:
+            return
+            
+        self.progress_dialog = self.create_progress_window("Odszyfrowywanie folderu...")
+
+        current_argon2_params = self.settings["argon2_params"][self.encryption_level]
+        
+        self.crypto_worker = FolderCryptoWorker(
+            "decrypt", password, current_argon2_params, encrypted_path, output_folder, self
+        )
+        
+        self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
+        self.crypto_worker.progress.connect(self.progress_dialog.setValue)
+        self.crypto_worker.finished.connect(self.on_crypto_finished)
+        self.crypto_worker.error.connect(self.on_crypto_error)
+        self.progress_dialog.canceled.connect(self.cancel_crypto_worker)
+
+        self.crypto_worker.start() 
+        self.progress_dialog.exec()
+
     def _save_current_file(self, file_path, migrate=False):
         try:
             if not self.password or migrate:
-                password = self._prompt_new_password_with_verification()
+                password = self._prompt_new_password_with_verification(for_folder=False)
                 if not password:
                     raise ValueError("Hasło jest wymagane!")
                 self.password = password
@@ -944,7 +1083,7 @@ Funkcje:
     @pyqtSlot()
     def on_no_update_found(self):
         """Pokazuje okno 'Brak aktualizacji' (tylko przy sprawdzaniu ręcznym)."""
-        QMessageBox.information(self, "SafePad - Aktualizacje", "Masz najnowszą wersję programu.")
+        QMessageBox.information(self, "SafePad - Aktualizacje", "Masz najnowszę wersję programu.")
 
     @pyqtSlot(str)
     def on_update_error(self, error_msg):
@@ -1363,7 +1502,7 @@ Funkcje:
             return
 
         try:
-            import client_config 
+            import client_config
             
             self.update_client = Client(client_config)
             
@@ -1965,7 +2104,6 @@ def main():
     app_font.setWeight(QFont.Weight.Normal)
     app.setFont(app_font)
     
-    # Set application icon
     icon_paths = [
         "/usr/share/pixmaps/safepad.png",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "safe.png"),
