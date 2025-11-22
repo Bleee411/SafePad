@@ -160,6 +160,7 @@ class MigrationTool:
                 with open(file_path, "rb") as f:
                     file_data = f.read()
                 
+                # Sprawdź czy plik jest już w nowym formacie
                 if file_data.startswith(ENCRYPTION_VERSION.encode('utf-8')):
                     skipped_count += 1
                     continue
