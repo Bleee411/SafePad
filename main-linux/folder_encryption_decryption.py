@@ -26,6 +26,14 @@ class FolderCrypto:
             if progress_callback:
                 progress_callback(value)
 
+        # Sprawdź czy folder istnieje
+        if not os.path.exists(folder_path):
+            raise ValueError(f"Folder źródłowy nie istnieje: {folder_path}")
+            
+        # Sprawdź czy folder nie jest pusty
+        if not any(os.scandir(folder_path)):
+            raise ValueError(f"Folder źródłowy jest pusty: {folder_path}")
+
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, "temp_folder.zip")
         
@@ -38,23 +46,38 @@ class FolderCrypto:
                 for root, dirs, files in os.walk(folder_path):
                     for file in files:
                         file_path = os.path.join(root, file)
+                        # Pomijanie ukrytych plików i tymczasowych
+                        if os.path.basename(file_path).startswith('.'):
+                            continue
                         arcname = os.path.relpath(file_path, folder_path)
                         all_files.append((file_path, arcname))
                 
                 total_files = len(all_files)
+                if total_files == 0:
+                    raise ValueError("Brak plików do zaszyfrowania w folderze")
+                    
                 for i, (file_path, arcname) in enumerate(all_files):
-                    zipf.write(file_path, arcname)
-                    progress = (i + 1) / total_files * 50  # Kompresja to pierwsze 50%
-                    update_progress(progress)
+                    try:
+                        zipf.write(file_path, arcname)
+                        progress = (i + 1) / total_files * 50  # Kompresja to pierwsze 50%
+                        update_progress(progress)
+                        update_status(f"Kompresowanie... ({i+1}/{total_files})")
+                    except Exception as e:
+                        print(f"Ostrzeżenie: Nie udało się dodać pliku {file_path}: {e}")
+                        continue
             
             update_status("Krok 2/3: Szyfrowanie danych...")
+            
+            # Sprawdź czy plik zip został utworzony i nie jest pusty
+            if not os.path.exists(temp_zip_path) or os.path.getsize(temp_zip_path) == 0:
+                raise ValueError("Nie udało się utworzyć archiwum ZIP")
             
             # Odczyt skompresowanych danych
             with open(temp_zip_path, 'rb') as f:
                 zip_data = f.read()
             
             # Etap 2: Szyfrowanie (Ustawia postęp na 75%)
-            # To jest pojedyncza, wolna operacja, więc po prostu ustawiamy postęp
+            update_progress(50)
             salt = os.urandom(self.encryption_handler.get_salt_size())
             nonce = os.urandom(self.encryption_handler.get_nonce_size())
             key = self.encryption_handler.generate_key(self.password, salt)
@@ -71,10 +94,17 @@ class FolderCrypto:
                 f.write(encrypted_data)
                 
             update_progress(100)
+            update_status("Szyfrowanie zakończone pomyślnie!")
             
             return True
             
         except Exception as e:
+            # Usuń częściowo utworzony plik wyjściowy w przypadku błędu
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                except:
+                    pass
             raise e
         finally:
             # Czyszczenie
@@ -98,6 +128,16 @@ class FolderCrypto:
             if progress_callback:
                 progress_callback(value)
 
+        # Sprawdź czy zaszyfrowany plik istnieje
+        if not os.path.exists(encrypted_path):
+            raise ValueError(f"Zaszyfrowany plik nie istnieje: {encrypted_path}")
+            
+        # Sprawdź czy folder wyjściowy istnieje, jeśli nie - utwórz
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder, exist_ok=True)
+        elif not os.path.isdir(output_folder):
+            raise ValueError(f"Ścieżka wyjściowa nie jest folderem: {output_folder}")
+
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, "temp_folder.zip")
         
@@ -111,7 +151,7 @@ class FolderCrypto:
             if len(file_data) < 32:
                 raise ValueError("Plik jest za krótki lub uszkodzony")
             
-            version = file_data[:4].decode('utf-8')
+            version = file_data[:4].decode('utf-8', errors='ignore')
             if version != ENCRYPTION_VERSION:
                  raise ValueError("Format pliku nie jest wspierany")
             
@@ -140,14 +180,29 @@ class FolderCrypto:
                 file_list = zipf.namelist()
                 total_files = len(file_list)
                 
+                if total_files == 0:
+                    raise ValueError("Archiwum ZIP jest puste")
+                
                 for i, file_name in enumerate(file_list):
-                    zipf.extract(file_name, output_folder)
-                    
-                    # Dekompresja to drugie 50%
-                    progress = 50 + (i + 1) / total_files * 50  
-                    update_progress(progress)
+                    try:
+                        # Bezpieczne wypakowywanie - zapobieganie atakom Path Traversal
+                        safe_file_name = os.path.normpath(file_name)
+                        if safe_file_name.startswith('..') or os.path.isabs(safe_file_name):
+                            print(f"Ostrzeżenie: Pominięto podejrzaną ścieżkę: {file_name}")
+                            continue
+                            
+                        zipf.extract(file_name, output_folder)
+                        
+                        # Dekompresja to drugie 50%
+                        progress = 50 + (i + 1) / total_files * 50  
+                        update_progress(progress)
+                        update_status(f"Wypakowywanie... ({i+1}/{total_files})")
+                    except Exception as e:
+                        print(f"Ostrzeżenie: Nie udało się wypakować pliku {file_name}: {e}")
+                        continue
                 
             update_progress(100)
+            update_status("Odszyfrowywanie zakończone pomyślnie!")
                 
             return True
             
