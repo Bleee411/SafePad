@@ -70,7 +70,7 @@
 
 ### Uruchamianie skompilowanej wersji (Linux)
 
-Po pobraniu skompilowanej wersji z sekcji "Releases":
+Po pobraniu skompilowanej wersji z https://github.com/Bleee411/SafePad/tree/Linux:
 
 1.  Nadaj plikowi uprawnienia do uruchomienia:
     ```bash
