@@ -1,9 +1,11 @@
-##########################################################
-#                                                        # 
-#           Program oraz kod autorstwa Szofer            #
-#            Licencja: MIT License                       #
-#                                                        #
-##########################################################
+######################################################################
+#                                                                    # 
+#           Program oraz kod autorstwa Szofer                        #
+#            Licencja: MIT License                                   #
+#            Ważna informacja; Chwilowo prace nad aktualizacjami     #
+#              z pyupdater są wstrzymane                             #
+#                                                                    #
+######################################################################
 
 import sys
 import os
@@ -1846,4 +1848,5 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
+
     main()
