@@ -36,7 +36,7 @@
 
 ## 🌍 Platformy
 - 🪟 Windows — pełne wsparcie  
-- 🐧 Linux — wkrótce dostępne  
+- 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13)  
 
 
 
