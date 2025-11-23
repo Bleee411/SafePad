@@ -67,7 +67,7 @@ except ImportError:
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
 class SafePadApp(QMainWindow):
-    APP_VERSION = "2.0.1_dev.build.1"
+    APP_VERSION = "2.0.1"
     AUTHOR = "Szofer"
 
     try:
@@ -444,11 +444,14 @@ class SafePadApp(QMainWindow):
         )
         return password if ok else None
 
-    def _prompt_new_password_with_verification(self):
-        """Prompt for new password with verification"""
+    def _prompt_new_password_with_verification(self, for_folder=False):
+        """Prompt for new password with verification (updated for folder support)"""
+        title = "Nowe hasło do folderu" if for_folder else "Nowe hasło"
+        msg = "Wpisz hasło do zaszyfrowania folderu:" if for_folder else "Wpisz hasło do zaszyfrowania pliku:"
+        
         while True:
             password, ok = QInputDialog.getText(
-                self, "Nowe hasło", "Wpisz hasło do zaszyfrowania pliku:",
+                self, title, msg,
                 QLineEdit.EchoMode.Password
             )
             if not ok or not password:
@@ -1025,23 +1028,75 @@ Funkcje:
 
 
     def initiate_folder_encryption(self):
-        """Initiate folder encryption process"""
+        """Rozpoczyna proces szyfrowania folderu (Windows)"""
         folder_path = QFileDialog.getExistingDirectory(self, "Wybierz folder do zaszyfrowania")
         if not folder_path:
             return
             
+        default_name = os.path.basename(folder_path)
+        
         output_path, _ = QFileDialog.getSaveFileName(
-            self, "Zapisz zaszyfrowany folder jako", "",
+            self, "Zapisz zaszyfrowany folder jako", default_name,
             "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
         )
         if not output_path:
             return
+
+        if not output_path.lower().endswith('.enc'):
+            output_path += '.enc'
             
-        password = self.prompt_password()
+        password = self._prompt_new_password_with_verification(for_folder=True)
         if not password:
             return
+
+        if os.path.exists(output_path):
+            reply = QMessageBox.question(
+                self, "Potwierdzenie",
+                f"Plik {os.path.basename(output_path)} już istnieje. Czy chcesz go nadpisać?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
             
-        self.progress_dialog = self.create_progress_window("Szyfrowanie folderu...")
+        self.progress_dialog = QProgressDialog("Przygotowywanie szyfrowania...", "Anuluj", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Szyfrowanie")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(True)
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setMinimumDuration(0)
+        
+        self.progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                background-color: #2B2B2B;
+                color: #FAFAFA;
+            }
+            QLabel {
+                color: #FAFAFA;
+                font-weight: normal;
+                background-color: transparent;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+            }
+            QProgressBar::chunk {
+                background-color: #FFC107;
+            }
+            QPushButton {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #FFC107;
+                color: #000000;
+            }
+        """)
         
         current_argon2_params = self.settings["argon2_params"][self.encryption_level]
 
@@ -1059,7 +1114,7 @@ Funkcje:
         self.progress_dialog.exec()
         
     def decrypt_folder(self):
-        """Initiate folder decryption process"""
+        """Rozpoczyna proces deszyfrowania folderu (Windows)"""
         encrypted_path, _ = QFileDialog.getOpenFileName(
             self, "Wybierz zaszyfrowany folder", "",
             "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
@@ -1067,20 +1122,64 @@ Funkcje:
         if not encrypted_path:
             return
             
-        output_folder = QFileDialog.getExistingDirectory(self, "Wybierz folder docelowy do odszyfrowania")
-        if not output_folder:
+        base_name = os.path.basename(encrypted_path)
+        if base_name.lower().endswith('.enc'):
+            base_name = base_name[:-4]
+
+        output_folder_root = QFileDialog.getExistingDirectory(self, "Wybierz folder docelowy do odszyfrowania")
+        if not output_folder_root:
             return
+
+        final_output_path = os.path.join(output_folder_root, base_name)
             
         password = self.prompt_password()
         if not password:
             return
             
-        self.progress_dialog = self.create_progress_window("Odszyfrowywanie folderu...")
+        self.progress_dialog = QProgressDialog("Przygotowywanie deszyfrowania...", "Anuluj", 0, 100, self)
+        self.progress_dialog.setWindowTitle("Odszyfrowywanie")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(True)
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setMinimumDuration(0)
+
+        self.progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                background-color: #2B2B2B;
+                color: #FAFAFA;
+            }
+            QLabel {
+                color: #FAFAFA;
+                font-weight: normal;
+                background-color: transparent;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+            }
+            QProgressBar::chunk {
+                background-color: #FFC107;
+            }
+            QPushButton {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #FFC107;
+                color: #000000;
+            }
+        """)
 
         current_argon2_params = self.settings["argon2_params"][self.encryption_level]
         
         self.crypto_worker = FolderCryptoWorker(
-            "decrypt", password, current_argon2_params, encrypted_path, output_folder, self
+            "decrypt", password, current_argon2_params, encrypted_path, final_output_path, self
         )
         
         self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
@@ -1090,7 +1189,7 @@ Funkcje:
         self.progress_dialog.canceled.connect(self.cancel_crypto_worker)
 
         self.crypto_worker.start() 
-        self.progress_dialog.exec() 
+        self.progress_dialog.exec()
         
     @pyqtSlot()
     def cancel_crypto_worker(self):
@@ -1848,5 +1947,4 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
-
     main()
