@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 ##########################################################
 #                                                        # 
 #           Program oraz kod autorstwa Szofer            #
@@ -772,31 +773,30 @@ class SafePadApp(QMainWindow):
         return None
 
     def initiate_folder_encryption(self):
-        """Initiate folder encryption process with password validation"""
+        """Rozpoczyna proces szyfrowania folderu z wymuszeniem rozszerzenia i weryfikacją hasła"""
         folder_path = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder do zaszyfrowania")
         if not folder_path:
             return
             
-        # Automatycznie dodaj rozszerzenie .enc dla zaszyfrowanego folderu
-        default_name = os.path.basename(folder_path) + ".enc"
-        default_path = os.path.join(os.path.dirname(folder_path), default_name)
+        # Domyślna nazwa pliku wyjściowego
+        default_name = os.path.basename(folder_path)
         
         output_path, _ = QFileDialog.getSaveFileName(
-            self, "SafePad - Zapisz zaszyfrowany folder jako", default_path,
+            self, "SafePad - Zapisz zaszyfrowany folder jako", default_name,
             "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
         )
         if not output_path:
             return
             
-        # Automatycznie dodaj rozszerzenie .enc jeśli nie ma
+        # --- POPRAWKA: Wymuszanie rozszerzenia .enc ---
         if not output_path.lower().endswith('.enc'):
             output_path += '.enc'
             
+        # --- POPRAWKA: Podwójna weryfikacja hasła ---
         password = self._prompt_new_password_with_verification(for_folder=True)
         if not password:
             return
             
-        # Sprawdź czy folder wyjściowy istnieje i zapytaj o nadpisanie
         if os.path.exists(output_path):
             reply = QMessageBox.question(
                 self, "SafePad - Potwierdzenie",
@@ -806,7 +806,47 @@ class SafePadApp(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 return
             
-        self.progress_dialog = self.create_progress_window("Szyfrowanie folderu...")
+        # --- POPRAWKA WIZUALNA: Stylizacja ProgressDialog ---
+        self.progress_dialog = QProgressDialog("Przygotowywanie szyfrowania...", "Anuluj", 0, 100, self)
+        self.progress_dialog.setWindowTitle("SafePad - Szyfrowanie")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(True)
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setMinimumDuration(0)
+        
+        # Styl CSS naprawiający czarny tekst i biały przycisk
+        self.progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                background-color: #2B2B2B;
+                color: #FAFAFA;
+            }
+            QLabel {
+                color: #FAFAFA; /* To zmienia czarny napis na biały */
+                font-weight: normal;
+                background-color: transparent;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+            }
+            QProgressBar::chunk {
+                background-color: #FFC107;
+            }
+            QPushButton {
+                background-color: #3C3C3C; /* Ciemny przycisk Anuluj */
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #FFC107;
+                color: #000000;
+            }
+        """)
         
         current_argon2_params = self.settings["argon2_params"][self.encryption_level]
 
@@ -823,22 +863,8 @@ class SafePadApp(QMainWindow):
         self.crypto_worker.start() 
         self.progress_dialog.exec()
 
-    @pyqtSlot(str)
-    def on_crypto_finished(self, success_message):
-        """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
-        self.progress_dialog.close()
-        self.update_status(success_message)
-        QMessageBox.information(self, "SafePad - Sukces", success_message)
-
-    @pyqtSlot(str)
-    def on_crypto_error(self, error_message):
-        """Slot wywoływany w przypadku błędu w wątku."""
-        self.progress_dialog.close()
-        self.update_status("Błąd operacji na folderze", is_error=True)
-        QMessageBox.critical(self, "SafePad - Błąd", f"Wystąpił błąd: {error_message}")
-        
     def decrypt_folder(self):
-        """Initiate folder decryption process"""
+        """Rozpoczyna proces deszyfrowania folderu"""
         encrypted_path, _ = QFileDialog.getOpenFileName(
             self, "SafePad - Wybierz zaszyfrowany folder", "",
             "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
@@ -846,20 +872,68 @@ class SafePadApp(QMainWindow):
         if not encrypted_path:
             return
             
-        output_folder = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder docelowy do odszyfrowania")
+        base_name = os.path.basename(encrypted_path)
+        if base_name.lower().endswith('.enc'):
+            base_name = base_name[:-4]
+            
+        output_folder = QFileDialog.getExistingDirectory(
+            self, "SafePad - Wybierz folder docelowy do odszyfrowania"
+        )
+        
         if not output_folder:
             return
+
+        final_output_path = os.path.join(output_folder, base_name)
             
         password = self.prompt_password()
         if not password:
             return
             
-        self.progress_dialog = self.create_progress_window("Odszyfrowywanie folderu...")
+        self.progress_dialog = QProgressDialog("Przygotowywanie deszyfrowania...", "Anuluj", 0, 100, self)
+        self.progress_dialog.setWindowTitle("SafePad - Odszyfrowywanie")
+        self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self.progress_dialog.setAutoClose(True)
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setMinimumDuration(0)
+        
+        # Ten sam styl CSS co wyżej
+        self.progress_dialog.setStyleSheet("""
+            QProgressDialog {
+                background-color: #2B2B2B;
+                color: #FAFAFA;
+            }
+            QLabel {
+                color: #FAFAFA;
+                font-weight: normal;
+                background-color: transparent;
+            }
+            QProgressBar {
+                border: 1px solid #555555;
+                border-radius: 3px;
+                text-align: center;
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+            }
+            QProgressBar::chunk {
+                background-color: #FFC107;
+            }
+            QPushButton {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 5px 15px;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #FFC107;
+                color: #000000;
+            }
+        """)
 
         current_argon2_params = self.settings["argon2_params"][self.encryption_level]
         
         self.crypto_worker = FolderCryptoWorker(
-            "decrypt", password, current_argon2_params, encrypted_path, output_folder, self
+            "decrypt", password, current_argon2_params, encrypted_path, final_output_path, self
         )
         
         self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
@@ -870,6 +944,252 @@ class SafePadApp(QMainWindow):
 
         self.crypto_worker.start() 
         self.progress_dialog.exec()
+        
+    @pyqtSlot()
+    def cancel_crypto_worker(self):
+        """Slot do anulowania operacji (przycisk Anuluj na pasku postępu)."""
+        if hasattr(self, 'crypto_worker') and self.crypto_worker.isRunning():
+            self.crypto_worker.terminate()
+            if hasattr(self, 'progress_dialog'):
+                self.progress_dialog.close()
+            self.update_status("Operacja anulowana przez użytkownika", is_error=True)
+
+    @pyqtSlot(str)
+    def on_crypto_finished(self, success_message):
+        """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+        self.update_status(success_message)
+        QMessageBox.information(self, "SafePad - Sukces", success_message)
+
+    @pyqtSlot(str)
+    def on_crypto_error(self, error_message):
+        """Slot wywoływany w przypadku błędu w wątku."""
+        if hasattr(self, 'progress_dialog'):
+            self.progress_dialog.close()
+        self.update_status("Błąd operacji na folderze", is_error=True)
+        QMessageBox.critical(self, "SafePad - Błąd", f"Wystąpił błąd: {error_message}")
+
+    def _prompt_new_password_with_verification(self, for_folder=False):
+        """Prompt for new password with verification"""
+        while True:
+            title = "SafePad - Nowe hasło do folderu" if for_folder else "SafePad - Nowe hasło"
+            message = "Wpisz hasło do zaszyfrowania folderu:" if for_folder else "Wpisz hasło do zaszyfrowania pliku:"
+            
+            dialog = QDialog(self)
+            dialog.setWindowTitle(title)
+            dialog.setFixedSize(400, 200)
+            dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #2B2B2B;
+                    color: #FAFAFA;
+                    font-family: 'Noto Sans', 'DejaVu Sans', 'Arial', sans-serif;
+                }
+                QLabel {
+                    color: #FAFAFA;
+                    font-weight: 400;
+                    padding: 5px;
+                }
+                QLineEdit {
+                    background-color: #3C3C3C;
+                    color: #FAFAFA;
+                    border: 2px solid #555555;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: 400;
+                }
+                QLineEdit:focus {
+                    border-color: #FFC107;
+                }
+                QPushButton {
+                    background-color: #3C3C3C;
+                    color: #FAFAFA;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                    min-width: 80px;
+                }
+                QPushButton:hover {
+                    background-color: #FFC107;
+                    color: #000000;
+                }
+                QPushButton:disabled {
+                    background-color: #555555;
+                    color: #888888;
+                }
+            """)
+            
+            layout = QVBoxLayout(dialog)
+            
+            # Etykieta z instrukcją
+            label = QLabel(message)
+            layout.addWidget(label)
+            
+            # Pole hasła
+            password_edit = QLineEdit()
+            password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            password_edit.setPlaceholderText("Wprowadź hasło...")
+            layout.addWidget(password_edit)
+            
+            # Przyciski
+            button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            button_box.accepted.connect(dialog.accept)
+            button_box.rejected.connect(dialog.reject)
+            layout.addWidget(button_box)
+            
+            password_edit.setFocus()
+            
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+                
+            password = password_edit.text()
+            
+            if not password:
+                QMessageBox.critical(self, "SafePad - Błąd", "Hasło nie może być puste.")
+                continue
+                
+            # Walidacja hasła
+            validation_error = self._validate_password(password)
+            if validation_error:
+                QMessageBox.critical(self, "SafePad - Błąd", validation_error)
+                continue
+                
+            # Potwierdzenie hasła - drugie okno
+            confirm_title = "SafePad - Potwierdź hasło do folderu" if for_folder else "SafePad - Potwierdź hasło"
+            confirm_message = "Wpisz hasło ponownie, aby potwierdzić:" if for_folder else "Wpisz hasło ponownie, aby potwierdzić:"
+            
+            confirm_dialog = QDialog(self)
+            confirm_dialog.setWindowTitle(confirm_title)
+            confirm_dialog.setFixedSize(400, 200)
+            confirm_dialog.setStyleSheet("""
+                QDialog {
+                    background-color: #2B2B2B;
+                    color: #FAFAFA;
+                    font-family: 'Noto Sans', 'DejaVu Sans', 'Arial', sans-serif;
+                }
+                QLabel {
+                    color: #FAFAFA;
+                    font-weight: 400;
+                    padding: 5px;
+                }
+                QLineEdit {
+                    background-color: #3C3C3C;
+                    color: #FAFAFA;
+                    border: 2px solid #555555;
+                    border-radius: 4px;
+                    padding: 8px;
+                    font-weight: 400;
+                }
+                QLineEdit:focus {
+                    border-color: #FFC107;
+                }
+                QPushButton {
+                    background-color: #3C3C3C;
+                    color: #FAFAFA;
+                    border: none;
+                    padding: 8px 16px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                    min-width: 80px;
+                }
+                QPushButton:hover {
+                    background-color: #FFC107;
+                    color: #000000;
+                }
+            """)
+            
+            confirm_layout = QVBoxLayout(confirm_dialog)
+            
+            confirm_label = QLabel(confirm_message)
+            confirm_layout.addWidget(confirm_label)
+            
+            confirm_edit = QLineEdit()
+            confirm_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            confirm_edit.setPlaceholderText("Powtórz hasło...")
+            confirm_layout.addWidget(confirm_edit)
+            
+            confirm_button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+            confirm_button_box.accepted.connect(confirm_dialog.accept)
+            confirm_button_box.rejected.connect(confirm_dialog.reject)
+            confirm_layout.addWidget(confirm_button_box)
+            
+            confirm_edit.setFocus()
+            
+            if confirm_dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+                
+            confirm_password = confirm_edit.text()
+            
+            if password == confirm_password:
+                return password
+            else:
+                QMessageBox.critical(self, "SafePad - Błąd", "Hasła nie są identyczne. Spróbuj ponownie.")
+
+    def prompt_password(self):
+        """Prompt for password with PyQt6 with theme"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("SafePad - Hasło")
+        dialog.setFixedSize(400, 150)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #2B2B2B;
+                color: #FAFAFA;
+                font-family: 'Noto Sans', 'DejaVu Sans', 'Arial', sans-serif;
+            }
+            QLabel {
+                color: #FAFAFA;
+                font-weight: 400;
+                padding: 5px;
+            }
+            QLineEdit {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 2px solid #555555;
+                border-radius: 4px;
+                padding: 8px;
+                font-weight: 400;
+            }
+            QLineEdit:focus {
+                border-color: #FFC107;
+            }
+            QPushButton {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: 500;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #FFC107;
+                color: #000000;
+            }
+        """)
+        
+        layout = QVBoxLayout(dialog)
+        
+        label = QLabel("Podaj hasło:")
+        layout.addWidget(label)
+        
+        password_edit = QLineEdit()
+        password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        password_edit.setPlaceholderText("Wprowadź hasło...")
+        layout.addWidget(password_edit)
+        
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+        
+        password_edit.setFocus()
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            return password_edit.text()
+        else:
+            return None
+
 
     def _save_current_file(self, file_path, migrate=False):
         try:
@@ -1242,96 +1562,7 @@ Funkcje:
             print(f"Błąd w save_security_settings: {e}")
 
 
-    def initiate_folder_encryption(self):
-        """Initiate folder encryption process"""
-        folder_path = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder do zaszyfrowania")
-        if not folder_path:
-            return
-            
-        output_path, _ = QFileDialog.getSaveFileName(
-            self, "SafePad - Zapisz zaszyfrowany folder jako", "",
-            "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
-        )
-        if not output_path:
-            return
-            
-        password = self.prompt_password()
-        if not password:
-            return
-            
-        self.progress_dialog = self.create_progress_window("Szyfrowanie folderu...")
-        
-        current_argon2_params = self.settings["argon2_params"][self.encryption_level]
-
-        self.crypto_worker = FolderCryptoWorker(
-            "encrypt", password, current_argon2_params, folder_path, output_path, self
-        )
-        
-        self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
-        self.crypto_worker.progress.connect(self.progress_dialog.setValue)
-        self.crypto_worker.finished.connect(self.on_crypto_finished)
-        self.crypto_worker.error.connect(self.on_crypto_error)
-        self.progress_dialog.canceled.connect(self.cancel_crypto_worker)
-        
-        self.crypto_worker.start() 
-        self.progress_dialog.exec()
-        
-    def decrypt_folder(self):
-        """Initiate folder decryption process"""
-        encrypted_path, _ = QFileDialog.getOpenFileName(
-            self, "SafePad - Wybierz zaszyfrowany folder", "",
-            "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
-        )
-        if not encrypted_path:
-            return
-            
-        output_folder = QFileDialog.getExistingDirectory(self, "SafePad - Wybierz folder docelowy do odszyfrowania")
-        if not output_folder:
-            return
-            
-        password = self.prompt_password()
-        if not password:
-            return
-            
-        self.progress_dialog = self.create_progress_window("Odszyfrowywanie folderu...")
-
-        current_argon2_params = self.settings["argon2_params"][self.encryption_level]
-        
-        self.crypto_worker = FolderCryptoWorker(
-            "decrypt", password, current_argon2_params, encrypted_path, output_folder, self
-        )
-        
-        self.crypto_worker.status.connect(self.progress_dialog.setLabelText)
-        self.crypto_worker.progress.connect(self.progress_dialog.setValue)
-        self.crypto_worker.finished.connect(self.on_crypto_finished)
-        self.crypto_worker.error.connect(self.on_crypto_error)
-        self.progress_dialog.canceled.connect(self.cancel_crypto_worker)
-
-        self.crypto_worker.start() 
-        self.progress_dialog.exec() 
-        
-    @pyqtSlot()
-    def cancel_crypto_worker(self):
-        """Slot do anulowania operacji (przycisk Anuluj na pasku postępu)."""
-        if hasattr(self, 'crypto_worker') and self.crypto_worker.isRunning():
-            self.crypto_worker.terminate()
-            self.progress_dialog.close()
-            self.update_status("Operacja anulowana przez użytkownika", is_error=True)
-
-    @pyqtSlot(str)
-    def on_crypto_finished(self, success_message):
-        """Slot wywoływany po pomyślnem zakończeniu pracy wątku."""
-        self.progress_dialog.close()
-        self.update_status(success_message)
-        QMessageBox.information(self, "SafePad - Sukces", "Operacja zakończona pomyślnie.")
-
-    @pyqtSlot(str)
-    def on_crypto_error(self, error_message):
-        """Slot wywoływany w przypadku błędu w wątku."""
-        self.progress_dialog.close()
-        self.update_status("Błąd operacji na folderze", is_error=True)
-        QMessageBox.critical(self, "SafePad - Błąd", f"Wystąpił błąd: {error_message}")
-
+    
     def migrate_old_files(self):
         """Otwiera dedykowane narzędzie do migracji plików."""
         if MigrationTool is None:
@@ -2128,4 +2359,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
