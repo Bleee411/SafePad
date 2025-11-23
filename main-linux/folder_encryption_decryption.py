@@ -31,8 +31,17 @@ class FolderCrypto:
             raise ValueError(f"Folder źródłowy nie istnieje: {folder_path}")
             
         # Sprawdź czy folder nie jest pusty
-        if not any(os.scandir(folder_path)):
-            raise ValueError(f"Folder źródłowy jest pusty: {folder_path}")
+        file_count = 0
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                if not file.startswith('.'):  # Pomijanie ukrytych plików
+                    file_count += 1
+                    
+        if file_count == 0:
+            raise ValueError(f"Folder źródłowy nie zawiera plików do zaszyfrowania: {folder_path}")
+
+        update_status("Przygotowywanie do szyfrowania...")
+        update_progress(0)
 
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, "temp_folder.zip")
@@ -87,6 +96,9 @@ class FolderCrypto:
             update_status("Krok 3/3: Zapisywanie pliku...")
             
             # Etap 3: Zapis (Ustawia postęp na 100%)
+            # Utwórz katalog docelowy jeśli nie istnieje
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            
             with open(output_path, 'wb') as f:
                 f.write(ENCRYPTION_VERSION.encode('utf-8'))
                 f.write(salt)
@@ -96,7 +108,7 @@ class FolderCrypto:
             update_progress(100)
             update_status("Szyfrowanie zakończone pomyślnie!")
             
-            return True
+            return f"Folder został zaszyfrowany: {output_path}"
             
         except Exception as e:
             # Usuń częściowo utworzony plik wyjściowy w przypadku błędu
@@ -132,10 +144,18 @@ class FolderCrypto:
         if not os.path.exists(encrypted_path):
             raise ValueError(f"Zaszyfrowany plik nie istnieje: {encrypted_path}")
             
-        # Sprawdź czy folder wyjściowy istnieje, jeśli nie - utwórz
-        if not os.path.exists(output_folder):
-            os.makedirs(output_folder, exist_ok=True)
-        elif not os.path.isdir(output_folder):
+        # Sprawdź rozmiar pliku
+        file_size = os.path.getsize(encrypted_path)
+        if file_size < 32:
+            raise ValueError("Plik jest za krótki lub uszkodzony")
+
+        update_status("Przygotowywanie do odszyfrowywania...")
+        update_progress(0)
+
+        # Utwórz folder wyjściowy jeśli nie istnieje
+        os.makedirs(output_folder, exist_ok=True)
+            
+        if not os.path.isdir(output_folder):
             raise ValueError(f"Ścieżka wyjściowa nie jest folderem: {output_folder}")
 
         temp_dir = tempfile.mkdtemp()
@@ -191,6 +211,11 @@ class FolderCrypto:
                             print(f"Ostrzeżenie: Pominięto podejrzaną ścieżkę: {file_name}")
                             continue
                             
+                        # Utwórz katalog jeśli nie istnieje
+                        file_dir = os.path.dirname(os.path.join(output_folder, safe_file_name))
+                        if file_dir and not os.path.exists(file_dir):
+                            os.makedirs(file_dir, exist_ok=True)
+                            
                         zipf.extract(file_name, output_folder)
                         
                         # Dekompresja to drugie 50%
@@ -204,7 +229,7 @@ class FolderCrypto:
             update_progress(100)
             update_status("Odszyfrowywanie zakończone pomyślnie!")
                 
-            return True
+            return f"Folder został odszyfrowany: {output_folder}"
             
         except Exception as e:
             raise e
