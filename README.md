@@ -72,8 +72,9 @@
 
 Po pobraniu skompilowanej wersji z https://github.com/Bleee411/SafePad/tree/Linux:
 
-1.  Nadaj plikowi uprawnienia do uruchomienia:
+1.  Nadaj plikowi uprawnienia do uruchomienia i pobierz libnotify-bin:
     ```bash
+    sudo apt install libnotify-bin
     chmod +x SafePad
     ```
 2.  Uruchom aplikację:
