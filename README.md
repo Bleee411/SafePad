@@ -37,7 +37,7 @@
 ## 🌍 Platformy
 - 🪟 Windows — pełne wsparcie  
 - 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13) 
-
+- Gałąź Wersji na Linuxa [Linux Tree](https://github.com/Bleee411/SafePad/tree/Linux)
 
 
 
