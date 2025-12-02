@@ -74,7 +74,7 @@ except ImportError:
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
 class SafePadApp(QMainWindow):
-    APP_VERSION = "2.0.1"
+    APP_VERSION = "2.0.2"
     AUTHOR = "Szofer"
 
     try:
@@ -2115,3 +2115,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
