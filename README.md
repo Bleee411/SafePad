@@ -62,6 +62,9 @@
     ```bash
     pip install -r requirements.txt
     ```
+    ```bash
+    sudo apt install libnotify-bin
+    ```
 
 3.  Uruchom aplikację:
     ```bash
@@ -72,8 +75,9 @@
 
 Po pobraniu skompilowanej wersji z sekcji "Releases":
 
-1.  Nadaj plikowi uprawnienia do uruchomienia:
+1.  Nadaj plikowi uprawnienia do uruchomienia i pobierz libnotify-bin:
     ```bash
+    sudo apt install libnotify-bin
     chmod +x SafePad
     ```
 2.  Uruchom aplikację:
