@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 ##########################################################
 #                                                        # 
 #           Program oraz kod autorstwa Szofer            #
@@ -60,9 +59,16 @@ try:
     PYUPDATER_AVAILABLE = True
 except ImportError:
     PYUPDATER_AVAILABLE = False
+    
+try:
+    from notifications import LinuxNotifier
+    NOTIFICATIONS_AVAILABLE = True
+except ImportError:
+    NOTIFICATIONS_AVAILABLE = False
+    print("UWAGA: System powiadomień nie jest dostępny")
 
 class SafePadApp(QMainWindow):
-    APP_VERSION = "2.0.1"
+    APP_VERSION = "2.0.2"
     AUTHOR = "Szofer"
 
     CONFIG_DIR = os.path.join(os.path.expanduser("~"), ".config", "SafePad")
@@ -89,6 +95,10 @@ class SafePadApp(QMainWindow):
         self.settings = self.load_settings()
         self.load_bruteforce_protection()
         self.initialize_password_requirements()
+        
+        self.notifier = None
+        if NOTIFICATIONS_AVAILABLE and self.settings.get("notifications", True):
+         self.init_notifier()
         
         self.setup_linux_gui()
         self.apply_amber_night_theme()
@@ -171,7 +181,7 @@ class SafePadApp(QMainWindow):
     def create_linux_menubar(self):
         """Create Linux-optimized menu bar"""
         menubar = self.menuBar()
-        menubar.setNativeMenuBar(True)  # Use system menu bar on Linux
+        menubar.setNativeMenuBar(True) 
         
         # File menu
         file_menu = menubar.addMenu("Plik")
@@ -207,12 +217,6 @@ class SafePadApp(QMainWindow):
         decrypt_folder_action = QAction("Odszyfruj folder...", self)
         decrypt_folder_action.triggered.connect(self.decrypt_folder)
         file_menu.addAction(decrypt_folder_action)
-        
-        file_menu.addSeparator()
-        
-        migrate_action = QAction("Migruj stare pliki...", self)
-        migrate_action.triggered.connect(self.migrate_old_files)
-        file_menu.addAction(migrate_action)
         
         file_menu.addSeparator()
         
@@ -672,27 +676,48 @@ class SafePadApp(QMainWindow):
                 )
 
     def _open_modern_file(self, file_path, password, file_data):
-        """Otwiera plik zaszyfrowany w nowym formacie AEAD (v2.0)."""
-        try:
-            salt = file_data[4:20]
-            nonce = file_data[20:32]
-            encrypted_data = file_data[32:]
+      """Otwiera plik zaszyfrowany w nowym formacie AEAD (v2.0)."""
+      try:
+          salt = file_data[4:20]
+          nonce = file_data[20:32]
+          encrypted_data = file_data[32:]
 
-            key = self.generate_key(password, salt)
-            decrypted_data = self.encryption_handler.decrypt_data(key, nonce, encrypted_data)
+          key = self.generate_key(password, salt)
+          decrypted_data = self.encryption_handler.decrypt_data(key, nonce, encrypted_data)
+        
+          self.password = password
+
+          self._deserialize_content(decrypted_data)
+          self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+          self.current_file = file_path
+          self.update_label()
+          self.update_status(f"Otwarto: {os.path.basename(file_path)}")
+        
+          #Plik otwarty
+          if self.settings.get("notifications", True):
+              self.send_notification(
+                  "SafePad - Otworzono plik",
+                  f"Plik '{os.path.basename(file_path)}' został odszyfrowany i otwarty.\n"
+                  f"Rozmiar: {self._format_file_size(len(file_data))}",
+                  "info",
+                  3000
+              )
             
-            self.password = password
-
-            self._deserialize_content(decrypted_data)
-            self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
-
-            self.current_file = file_path
-            self.update_label()
-            self.update_status(f"Otwarto: {os.path.basename(file_path)}")
-            self.reset_login_attempts()
-            self.text_edit.document().setModified(False)
-        except Exception as e:
-            raise ValueError(f"Nieprawidłowe hasło lub plik jest uszkodzony. Szczegóły: {e}")
+          self.reset_login_attempts()
+          self.text_edit.document().setModified(False)
+        
+      except Exception as e:
+          #Błąd otwarcia
+          if self.settings.get("notifications", True):
+              self.send_notification(
+                  "SafePad - Błąd otwarcia",
+                  f"Nie udało się otworzyć pliku:\n{str(e)[:100]}",
+                  "error",
+                  5000
+              )
+            
+          raise ValueError(f"Nieprawidłowe hasło lub plik jest uszkodzony. Szczegóły: {e}")
     
     def save_file(self):
         """Save current file"""
@@ -778,7 +803,6 @@ class SafePadApp(QMainWindow):
         if not folder_path:
             return
             
-        # Domyślna nazwa pliku wyjściowego
         default_name = os.path.basename(folder_path)
         
         output_path, _ = QFileDialog.getSaveFileName(
@@ -788,11 +812,9 @@ class SafePadApp(QMainWindow):
         if not output_path:
             return
             
-        # --- POPRAWKA: Wymuszanie rozszerzenia .enc ---
         if not output_path.lower().endswith('.enc'):
             output_path += '.enc'
             
-        # --- POPRAWKA: Podwójna weryfikacja hasła ---
         password = self._prompt_new_password_with_verification(for_folder=True)
         if not password:
             return
@@ -806,7 +828,6 @@ class SafePadApp(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 return
             
-        # --- POPRAWKA WIZUALNA: Stylizacja ProgressDialog ---
         self.progress_dialog = QProgressDialog("Przygotowywanie szyfrowania...", "Anuluj", 0, 100, self)
         self.progress_dialog.setWindowTitle("SafePad - Szyfrowanie")
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
@@ -814,7 +835,6 @@ class SafePadApp(QMainWindow):
         self.progress_dialog.setAutoReset(True)
         self.progress_dialog.setMinimumDuration(0)
         
-        # Styl CSS naprawiający czarny tekst i biały przycisk
         self.progress_dialog.setStyleSheet("""
             QProgressDialog {
                 background-color: #2B2B2B;
@@ -956,19 +976,36 @@ class SafePadApp(QMainWindow):
 
     @pyqtSlot(str)
     def on_crypto_finished(self, success_message):
-        """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
-        if hasattr(self, 'progress_dialog'):
-            self.progress_dialog.close()
-        self.update_status(success_message)
-        QMessageBox.information(self, "SafePad - Sukces", success_message)
+      """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
+      if hasattr(self, 'progress_dialog'):
+          self.progress_dialog.close()
+      self.update_status(success_message)
+    
+      if self.settings.get("notifications", True):
+          self.send_notification(
+              "SafePad - Operacja zakończona",
+              success_message,
+              "success",
+              4000
+          )
+        
+      QMessageBox.information(self, "SafePad - Sukces", success_message)
 
     @pyqtSlot(str)
     def on_crypto_error(self, error_message):
-        """Slot wywoływany w przypadku błędu w wątku."""
-        if hasattr(self, 'progress_dialog'):
-            self.progress_dialog.close()
-        self.update_status("Błąd operacji na folderze", is_error=True)
-        QMessageBox.critical(self, "SafePad - Błąd", f"Wystąpił błąd: {error_message}")
+      """Slot wywoływany w przypadku błędu w wątku."""
+      self.progress_dialog.close()
+      self.update_status("Błąd operacji na folderze", is_error=True)
+    
+      if self.settings.get("notifications", True):
+          self.send_windows_notification(
+              "SafePad - Błąd operacji",
+              f"Wystąpił błąd: {error_message[:100]}",
+              "error",
+              5000
+          )
+        
+      QMessageBox.critical(self, "Błąd", f"Wystąpił błąd: {error_message}")
 
     def _prompt_new_password_with_verification(self, for_folder=False):
         """Prompt for new password with verification"""
@@ -1192,39 +1229,59 @@ class SafePadApp(QMainWindow):
 
 
     def _save_current_file(self, file_path, migrate=False):
-        try:
-            if not self.password or migrate:
-                password = self._prompt_new_password_with_verification(for_folder=False)
-                if not password:
-                    raise ValueError("Hasło jest wymagane!")
-                self.password = password
+      try:
+          if not self.password or migrate:
+              password = self._prompt_new_password_with_verification(for_folder=False)
+              if not password:
+                  raise ValueError("Hasło jest wymagane!")
+              self.password = password
 
-            start_time = time.time() 
-            
-            self.salt = os.urandom(self.encryption_handler.get_salt_size())
-            nonce = os.urandom(self.encryption_handler.get_nonce_size())
-    
-            data_to_encrypt = self._serialize_content()
-            
-            self.key = self.generate_key(self.password, self.salt)
-            encrypted_data = self.encryption_handler.encrypt_data(self.key, nonce, data_to_encrypt)
+          start_time = time.time() 
+        
+          self.salt = os.urandom(self.encryption_handler.get_salt_size())
+          nonce = os.urandom(self.encryption_handler.get_nonce_size())
 
-            with open(file_path, "wb") as f:
-                f.write(ENCRYPTION_VERSION.encode('utf-8'))
-                f.write(self.salt)
-                f.write(nonce)
-                f.write(encrypted_data)
-            
-            duration = time.time() - start_time
-            file_size = os.path.getsize(file_path)
+          data_to_encrypt = self._serialize_content()
+        
+          self.key = self.generate_key(self.password, self.salt)
+          encrypted_data = self.encryption_handler.encrypt_data(self.key, nonce, data_to_encrypt)
 
-            self.update_status(f"Zapisano: {os.path.basename(file_path)}")
-            self.text_edit.document().setModified(False)
-            
-            self.show_file_encryption_success(file_path, duration, file_size)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "SafePad - Błąd", f"Nie udało się zapisać pliku: {str(e)}")
+          with open(file_path, "wb") as f:
+              f.write(ENCRYPTION_VERSION.encode('utf-8'))
+              f.write(self.salt)
+              f.write(nonce)
+              f.write(encrypted_data)
+        
+          duration = time.time() - start_time
+          file_size = os.path.getsize(file_path)
+
+          self.update_status(f"Zapisano: {os.path.basename(file_path)}")
+          self.text_edit.document().setModified(False)
+        
+          #Plik zapisany
+          if self.settings.get("notifications", True):
+              self.send_notification(
+                  "SafePad - Zapisano plik",
+                  f"Plik '{os.path.basename(file_path)}' został zaszyfrowany.\n"
+                  f"Rozmiar: {self._format_file_size(file_size)}\n"
+                  f"Czas operacji: {duration:.2f}s",
+                  "success",
+                  4000
+              )
+        
+          self.show_file_encryption_success(file_path, duration, file_size)
+        
+      except Exception as e:
+          #Błąd zapisu
+          if self.settings.get("notifications", True):
+              self.send_notification(
+                  "SafePad - Błąd zapisu",
+                  f"Nie udało się zapisać pliku:\n{str(e)[:100]}",
+                  "error",
+                  5000
+              )
+              
+          QMessageBox.critical(self, "SafePad - Błąd", f"Nie udało się zapisać pliku: {str(e)}")
 
     def generate_key(self, password, salt):
         """Generate encryption key using Argon2"""
@@ -1239,11 +1296,57 @@ class SafePadApp(QMainWindow):
 
 
     def toggle_notifications(self):
-        """Toggle notifications on/off"""
-        self.settings["notifications"] = not self.settings.get("notifications", True)
-        self.save_settings()
-        status = "Powiadomienia wyłączone" if not self.settings["notifications"] else "Powiadomienia włączone"
-        self.update_status(status)
+      """Toggle notifications on/off"""
+      self.settings["notifications"] = not self.settings.get("notifications", True)
+      self.save_settings()
+    
+      if self.settings["notifications"]:
+          self.init_notifier()
+      else:
+          self.notifier = None
+        
+      status = "Powiadomienia wyłączone" if not self.settings["notifications"] else "Powiadomienia włączone"
+      self.update_status(status)
+        
+    def init_notifier(self):
+      """Inicjalizuj system powiadomień"""
+      if NOTIFICATIONS_AVAILABLE:
+          try:
+              icon_paths = [
+                  "/usr/share/pixmaps/safepad.png",
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "safe.png"),
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"),
+              ]
+            
+              icon = None
+              for path in icon_paths:
+                  if os.path.exists(path):
+                      icon = path
+                      break
+            
+              self.notifier = LinuxNotifier("SafePad", icon)
+            
+              if not self.notifier.is_available:
+                  print("UWAGA: notify-send nie jest dostępny. Zainstaluj: sudo apt install libnotify-bin")
+                  self.notifier = None
+              else:
+                  print("System powiadomień zainicjalizowany")
+                
+          except Exception as e:
+              print(f"Błąd inicjalizacji systemu powiadomień: {e}")
+              self.notifier = None
+              
+    def send_notification(self, title, message, notification_type="info", timeout=5000):
+      """Wyślij powiadomienie (jeśli włączone)"""
+      if (self.notifier and 
+          self.settings.get("notifications", True) and
+          hasattr(self.notifier, 'send_notification')):
+        
+          try:
+              return self.notifier.send_notification(title, message, notification_type, timeout)
+          except:
+              return False
+      return False
 
     def change_password(self):
         """Change encryption password"""
@@ -1384,20 +1487,30 @@ Funkcje:
 
     @pyqtSlot()
     def show_update_notification(self):
-        """Pokazuje powiadomienie o gotowej aktualizacji na pasku statusu."""
-        self.update_status("Dostępna nowa wersja!")
-        
-        self.restart_btn = QPushButton("🎁 Uruchom ponownie, aby zaktualizować")
-        self.restart_btn.setStyleSheet("""
-            QPushButton { 
-                background-color: #FFC107; color: #000000; 
-                font-weight: bold; padding: 2px 5px; border-radius: 3px;
-            }
-            QPushButton:hover { background-color: #FFB300; }
-        """)
-        self.restart_btn.clicked.connect(self.apply_update_and_restart)
-        
-        self.status_bar.addPermanentWidget(self.restart_btn)
+      """Pokazuje powiadomienie o gotowej aktualizacji na pasku statusu."""
+      self.update_status("Dostępna nowa wersja!")
+    
+      if self.settings.get("notifications", True):
+          self.send_notification(
+              "SafePad - Dostępna aktualizacja",
+              "Dostępna jest nowa wersja programu!\n"
+              "Kliknij przycisk 'Uruchom ponownie' w pasku statusu,\n"
+              "aby automatycznie zaktualizować aplikację.",
+              "info",
+              10000,
+        )
+    
+      self.restart_btn = QPushButton("Uruchom ponownie, aby zaktualizować")
+      self.restart_btn.setStyleSheet("""
+          QPushButton { 
+              background-color: #FFC107; color: #000000; 
+              font-weight: bold; padding: 2px 5px; border-radius: 3px;
+          }
+          QPushButton:hover { background-color: #FFB300; }
+      """)
+      self.restart_btn.clicked.connect(self.apply_update_and_restart)
+    
+      self.status_bar.addPermanentWidget(self.restart_btn)
 
     @pyqtSlot()
     def on_no_update_found(self):
@@ -1743,6 +1856,42 @@ Funkcje:
         except Exception as e:
             print(f"BŁĄD: Nie udało się zainicjować klienta aktualizacji: {e}")
             self.update_client = None
+            
+    def init_notifier(self):
+      """Inicjalizuj system powiadomień"""
+      if NOTIFICATIONS_AVAILABLE:
+          try:
+              icon_paths = [
+                  "/usr/share/pixmaps/safepad.png",
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "safe.png"),
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.png"),
+              ]
+            
+              icon = None
+              for path in icon_paths:
+                  if os.path.exists(path):
+                      icon = path
+                      break
+            
+              self.notifier = LinuxNotifier("SafePad", icon)
+            
+              if not self.notifier.is_available:
+                  print("UWAGA: notify-send nie jest dostępny. Zainstaluj: sudo apt install libnotify-bin")
+                  self.notifier = None
+              else:
+                  print("System powiadomień zainicjalizowany")
+                
+                  if self.settings.get("notifications", True):
+                      QTimer.singleShot(2000, lambda: self.send_notification(
+                          "SafePad - Gotowy",
+                          f"Aplikacja została uruchomiona.\nWersja: {self.APP_VERSION}",
+                          "info",
+                          3000
+                      ))
+                
+          except Exception as e:
+              print(f"Błąd inicjalizacji systemu powiadomień: {e}")
+              self.notifier = None
                 
 class UpdateCheckWorker(QThread):
     """
