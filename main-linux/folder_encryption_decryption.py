@@ -9,6 +9,26 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
+def secure_delete(path, passes=1):
+    """Nadpisuje plik zerami przed usunięciem."""
+    if not os.path.exists(path):
+        return
+    
+    length = os.path.getsize(path)
+
+    try:
+        with open(path, "wb") as f:
+            for _ in range(passes):
+                f.seek(0)
+                f.write(b'\x00' * length)
+                f.flush()
+                os.fsync(f.fileno())
+    except Exception as e:
+        print(f"Błąd podczas bezpiecznego nadpisywania: {e}")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
 class FolderCrypto:
     def __init__(self, password, argon2_params):
         self.password = password
@@ -26,23 +46,6 @@ class FolderCrypto:
             if progress_callback:
                 progress_callback(value)
 
-        # Sprawdź czy folder istnieje
-        if not os.path.exists(folder_path):
-            raise ValueError(f"Folder źródłowy nie istnieje: {folder_path}")
-            
-        # Sprawdź czy folder nie jest pusty
-        file_count = 0
-        for root, dirs, files in os.walk(folder_path):
-            for file in files:
-                if not file.startswith('.'):  # Pomijanie ukrytych plików
-                    file_count += 1
-                    
-        if file_count == 0:
-            raise ValueError(f"Folder źródłowy nie zawiera plików do zaszyfrowania: {folder_path}")
-
-        update_status("Przygotowywanie do szyfrowania...")
-        update_progress(0)
-
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, "temp_folder.zip")
         
@@ -55,38 +58,22 @@ class FolderCrypto:
                 for root, dirs, files in os.walk(folder_path):
                     for file in files:
                         file_path = os.path.join(root, file)
-                        # Pomijanie ukrytych plików i tymczasowych
-                        if os.path.basename(file_path).startswith('.'):
-                            continue
                         arcname = os.path.relpath(file_path, folder_path)
                         all_files.append((file_path, arcname))
                 
                 total_files = len(all_files)
-                if total_files == 0:
-                    raise ValueError("Brak plików do zaszyfrowania w folderze")
-                    
                 for i, (file_path, arcname) in enumerate(all_files):
-                    try:
-                        zipf.write(file_path, arcname)
-                        progress = (i + 1) / total_files * 50  # Kompresja to pierwsze 50%
-                        update_progress(progress)
-                        update_status(f"Kompresowanie... ({i+1}/{total_files})")
-                    except Exception as e:
-                        print(f"Ostrzeżenie: Nie udało się dodać pliku {file_path}: {e}")
-                        continue
+                    zipf.write(file_path, arcname)
+                    progress = (i + 1) / total_files * 50 
+                    update_progress(progress)
             
             update_status("Krok 2/3: Szyfrowanie danych...")
-            
-            # Sprawdź czy plik zip został utworzony i nie jest pusty
-            if not os.path.exists(temp_zip_path) or os.path.getsize(temp_zip_path) == 0:
-                raise ValueError("Nie udało się utworzyć archiwum ZIP")
             
             # Odczyt skompresowanych danych
             with open(temp_zip_path, 'rb') as f:
                 zip_data = f.read()
             
             # Etap 2: Szyfrowanie (Ustawia postęp na 75%)
-            update_progress(50)
             salt = os.urandom(self.encryption_handler.get_salt_size())
             nonce = os.urandom(self.encryption_handler.get_nonce_size())
             key = self.encryption_handler.generate_key(self.password, salt)
@@ -96,9 +83,6 @@ class FolderCrypto:
             update_status("Krok 3/3: Zapisywanie pliku...")
             
             # Etap 3: Zapis (Ustawia postęp na 100%)
-            # Utwórz katalog docelowy jeśli nie istnieje
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
-            
             with open(output_path, 'wb') as f:
                 f.write(ENCRYPTION_VERSION.encode('utf-8'))
                 f.write(salt)
@@ -106,23 +90,16 @@ class FolderCrypto:
                 f.write(encrypted_data)
                 
             update_progress(100)
-            update_status("Szyfrowanie zakończone pomyślnie!")
             
-            return f"Folder został zaszyfrowany: {output_path}"
+            return True
             
         except Exception as e:
-            # Usuń częściowo utworzony plik wyjściowy w przypadku błędu
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except:
-                    pass
             raise e
         finally:
             # Czyszczenie
             try:
                 if os.path.exists(temp_zip_path):
-                    os.unlink(temp_zip_path)
+                    secure_delete(temp_zip_path) # Użycie bezpiecznego usuwania
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
             except:
@@ -140,24 +117,6 @@ class FolderCrypto:
             if progress_callback:
                 progress_callback(value)
 
-        # Sprawdź czy zaszyfrowany plik istnieje
-        if not os.path.exists(encrypted_path):
-            raise ValueError(f"Zaszyfrowany plik nie istnieje: {encrypted_path}")
-            
-        # Sprawdź rozmiar pliku
-        file_size = os.path.getsize(encrypted_path)
-        if file_size < 32:
-            raise ValueError("Plik jest za krótki lub uszkodzony")
-
-        update_status("Przygotowywanie do odszyfrowywania...")
-        update_progress(0)
-
-        # Utwórz folder wyjściowy jeśli nie istnieje
-        os.makedirs(output_folder, exist_ok=True)
-            
-        if not os.path.isdir(output_folder):
-            raise ValueError(f"Ścieżka wyjściowa nie jest folderem: {output_folder}")
-
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, "temp_folder.zip")
         
@@ -171,11 +130,11 @@ class FolderCrypto:
             if len(file_data) < 32:
                 raise ValueError("Plik jest za krótki lub uszkodzony")
             
-            version = file_data[:4].decode('utf-8', errors='ignore')
+            version = file_data[:4].decode('utf-8')
             if version != ENCRYPTION_VERSION:
                  raise ValueError("Format pliku nie jest wspierany")
             
-            update_progress(10) # Mały postęp za odczyt
+            update_progress(10)
 
             # Etap 2: Deszyfrowanie (Ustawia postęp na 50%)
             update_status("Krok 2/3: Deszyfrowanie danych...")
@@ -200,36 +159,16 @@ class FolderCrypto:
                 file_list = zipf.namelist()
                 total_files = len(file_list)
                 
-                if total_files == 0:
-                    raise ValueError("Archiwum ZIP jest puste")
-                
                 for i, file_name in enumerate(file_list):
-                    try:
-                        # Bezpieczne wypakowywanie - zapobieganie atakom Path Traversal
-                        safe_file_name = os.path.normpath(file_name)
-                        if safe_file_name.startswith('..') or os.path.isabs(safe_file_name):
-                            print(f"Ostrzeżenie: Pominięto podejrzaną ścieżkę: {file_name}")
-                            continue
-                            
-                        # Utwórz katalog jeśli nie istnieje
-                        file_dir = os.path.dirname(os.path.join(output_folder, safe_file_name))
-                        if file_dir and not os.path.exists(file_dir):
-                            os.makedirs(file_dir, exist_ok=True)
-                            
-                        zipf.extract(file_name, output_folder)
-                        
-                        # Dekompresja to drugie 50%
-                        progress = 50 + (i + 1) / total_files * 50  
-                        update_progress(progress)
-                        update_status(f"Wypakowywanie... ({i+1}/{total_files})")
-                    except Exception as e:
-                        print(f"Ostrzeżenie: Nie udało się wypakować pliku {file_name}: {e}")
-                        continue
+                    zipf.extract(file_name, output_folder)
+                    
+                    # Dekompresja to drugie 50%
+                    progress = 50 + (i + 1) / total_files * 50  
+                    update_progress(progress)
                 
             update_progress(100)
-            update_status("Odszyfrowywanie zakończone pomyślnie!")
                 
-            return f"Folder został odszyfrowany: {output_folder}"
+            return True
             
         except Exception as e:
             raise e
@@ -237,7 +176,7 @@ class FolderCrypto:
             # Czyszczenie
             try:
                 if os.path.exists(temp_zip_path):
-                    os.unlink(temp_zip_path)
+                    secure_delete(temp_zip_path) # ZMIANA: Bezpieczne usuwanie zamiast os.unlink
                 if os.path.exists(temp_dir):
                     shutil.rmtree(temp_dir)
             except:
