@@ -9,7 +9,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives.padding import PKCS7
 
-# --- PRZENIESIONO FUNKCJĘ TUTAJ (GLOBALNIE) ---
 def secure_delete(path, passes=1):
     """Nadpisuje plik zerami przed usunięciem."""
     if not os.path.exists(path):
@@ -182,3 +181,4 @@ class FolderCrypto:
                     shutil.rmtree(temp_dir)
             except:
                 pass
+
