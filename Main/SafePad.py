@@ -21,14 +21,16 @@ from packaging.version import parse
 from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QSize, QTimer, pyqtSlot, QUrl, 
                           QByteArray, QBuffer, QIODevice)
 from PyQt6.QtGui import (QAction, QIcon, QPalette, QColor, QFont, QTextCursor, 
-                         QPixmap, QKeySequence, QImage, QTextImageFormat, QTextDocument)
+                         QPixmap, QKeySequence, QImage, QTextImageFormat, QTextDocument,
+                         QGuiApplication,QGuiApplication)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QTextEdit, QLabel, QToolBar, QStatusBar, QMenuBar, QMenu,
                             QDialog, QTabWidget, QFormLayout, QCheckBox, QSpinBox,
                             QPushButton, QProgressBar, QMessageBox, QFileDialog,
                             QDialogButtonBox, QFrame, QScrollArea, QLineEdit, 
                             QRadioButton, QButtonGroup, QProgressDialog, QInputDialog,
-                            QSizePolicy, QGridLayout, QGroupBox)
+                            QSizePolicy, QGridLayout, QGroupBox, QSystemTrayIcon,
+                            QComboBox,QGraphicsDropShadowEffect)
 import requests
 import webbrowser
 import winreg 
@@ -63,18 +65,189 @@ try:
     PYUPDATER_AVAILABLE = True
 except ImportError:
     PYUPDATER_AVAILABLE = False
-    
-try:
-    from notifications import Notifier
-    WINDOWS_NOTIFICATIONS_AVAILABLE = True
-except ImportError:
-    WINDOWS_NOTIFICATIONS_AVAILABLE = False
-    print("UWAGA: System powiadomień Windows nie jest dostępny")
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
+class UnlockDialog(QDialog):
+    """Dialog for PIN/password login"""
+    
+    def __init__(self, parent=None, stationary_mode=False, stationary_pin=None):
+        super().__init__(parent)
+        self.stationary_mode = stationary_mode
+        self.stationary_pin = stationary_pin
+        self.old_pos = None
+        self.setup_ui()
+
+    def setup_ui(self):
+        self.setWindowTitle("SafePad")
+        self.setFixedSize(480, 290)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Główny layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(0)
+        
+        # Kontener
+        self.container = QFrame()
+        self.container.setStyleSheet("""
+            QFrame {
+                background-color: #2B2B2B;
+                border-radius: 12px;
+                border: 1px solid #444444;
+            }
+        """)
+        
+        # Cień
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(20)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 0)
+        self.container.setGraphicsEffect(shadow)
+        
+        container_layout = QVBoxLayout(self.container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(0)
+        main_layout.addWidget(self.container)
+
+        # Nagłówek
+        header = QFrame()
+        header.setFixedHeight(60)
+        header.setStyleSheet("""
+            QFrame {
+                background-color: #FFC107;
+                border-top-left-radius: 12px;
+                border-top-right-radius: 12px;
+                border-bottom: 1px solid #E0A800;
+            }
+        """)
+        header_layout = QVBoxLayout(header)
+        # Zmieniamy tytuł w zależności od trybu
+        title_text = "🔒 SafePad Zablokowany" if self.stationary_pin else "🔑 Logowanie SafePad"
+        lbl_title = QLabel(title_text)
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: bold; color: #222; border: none;")
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(lbl_title)
+        container_layout.addWidget(header)
+        
+        # Treść
+        content = QFrame()
+        content.setStyleSheet("background: transparent; border: none;")
+        layout_content = QVBoxLayout(content)
+        layout_content.setContentsMargins(25, 20, 25, 20)
+        layout_content.setSpacing(15)
+        
+        layout_content.addWidget(QLabel("Wprowadź hasło:", alignment=Qt.AlignmentFlag.AlignCenter))
+        
+        # Pole hasła
+        self.pin_input = QLineEdit()
+        self.pin_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin_input.setPlaceholderText("Hasło...")
+        self.pin_input.setFixedHeight(40)
+        self.pin_input.setStyleSheet("""
+            QLineEdit {
+                background-color: #1E1E1E; color: white;
+                border: 2px solid #555; border-radius: 8px; padding: 0 10px;
+            }
+            QLineEdit:focus { border: 2px solid #FFC107; }
+        """)
+        self.pin_input.returnPressed.connect(self.check_password)
+        layout_content.addWidget(self.pin_input)
+        
+        # Pokaż hasło
+        self.btn_show = QPushButton("👁️ Pokaż hasło")
+        self.btn_show.setCheckable(True)
+        self.btn_show.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_show.setStyleSheet("color: #888; border: none;")
+        self.btn_show.toggled.connect(lambda c: self.pin_input.setEchoMode(QLineEdit.EchoMode.Normal if c else QLineEdit.EchoMode.Password))
+        layout_content.addWidget(self.btn_show, alignment=Qt.AlignmentFlag.AlignRight)
+        
+        # Przyciski
+        btns = QHBoxLayout()
+        btn_action_text = "ODBLOKUJ" if self.stationary_pin else "ZALOGUJ"
+        btn_unlock = QPushButton(btn_action_text)
+        btn_unlock.setFixedHeight(40)
+        btn_unlock.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_unlock.setStyleSheet("""
+            QPushButton {
+                background-color: #FFC107; color: #222;
+                border-radius: 8px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #FFD54F; }
+        """)
+        btn_unlock.clicked.connect(self.check_password)
+        
+        btn_exit = QPushButton("Wyjście")
+        btn_exit.setFixedHeight(40)
+        btn_exit.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_exit.setStyleSheet("""
+            QPushButton {
+                background-color: #444; color: #DDD;
+                border-radius: 8px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #555; }
+        """)
+        btn_exit.clicked.connect(QApplication.instance().quit)
+        
+        btns.addWidget(btn_unlock)
+        btns.addWidget(btn_exit)
+        layout_content.addLayout(btns)
+        
+        self.lbl_error = QLabel("")
+        self.lbl_error.setStyleSheet("color: #ff5252; font-weight: bold;")
+        self.lbl_error.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout_content.addWidget(self.lbl_error)
+        
+        container_layout.addWidget(content)
+        main_layout.addWidget(self.container)
+        self.center_on_screen()
+
+    # --- NOWA METODA (NAPRAWIA BŁĄD) ---
+    def get_pin(self):
+        """Zwraca wpisane hasło - wymagane przez SafePadApp przy logowaniu."""
+        return self.pin_input.text()
+
+    def check_password(self):
+        entered = self.pin_input.text()
+        
+        # TRYB 1: ODBLOKOWANIE Z TRAYA (Mamy wzorzec hasła)
+        if self.stationary_pin is not None:
+            if entered == self.stationary_pin:
+                self.accept()
+            else:
+                self.show_error("Nieprawidłowe hasło!")
+        
+        # TRYB 2: PIERWSZE LOGOWANIE (Nie mamy wzorca, zwracamy hasło do aplikacji)
+        else:
+            if len(entered) > 0:
+                self.accept() # Main app sprawdzi czy hasło jest dobre (kluczem szyfrującym)
+            else:
+                self.show_error("Wprowadź hasło!")
+
+    def show_error(self, msg):
+        self.lbl_error.setText(msg)
+        self.pin_input.setStyleSheet(self.pin_input.styleSheet().replace("#555", "#ff5252"))
+        self.pin_input.selectAll()
+        self.pin_input.setFocus()
+
+    def center_on_screen(self):
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            self.move((geo.width() - self.width()) // 2, (geo.height() - self.height()) // 2)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton: self.old_pos = e.globalPosition().toPoint()
+    def mouseMoveEvent(self, e):
+        if self.old_pos:
+            delta = e.globalPosition().toPoint() - self.old_pos
+            self.move(self.pos() + delta)
+            self.old_pos = e.globalPosition().toPoint()
+    def mouseReleaseEvent(self, e): self.old_pos = None
+
 class SafePadApp(QMainWindow):
-    APP_VERSION = "2.0.2"
+    APP_VERSION = "2.0.2-DEV.1"
     AUTHOR = "Szofer"
 
     try:
@@ -103,19 +276,183 @@ class SafePadApp(QMainWindow):
         self.current_theme = "dark"
         self.image_references = []
         self.current_file = None
+        self.is_locked = False
+        self.stationary_mode_enabled = False
+        self.stationary_pin = None
+        self.lock_hotkey = "Ctrl+Shift+L"
+        self.hotkey_registered = False
         
         self.settings = self.load_settings()
         self.load_bruteforce_protection()
         self.initialize_password_requirements()
-        self.notifier = None
-        if WINDOWS_NOTIFICATIONS_AVAILABLE and self.settings.get("notifications", True):
-         self.init_windows_notifier()
         
+        # Check if we need to show login dialog
+        self.stationary_mode_enabled = self.settings.get("stationary_mode_enabled", False)
+        self.stationary_pin = self.settings.get("stationary_pin")
+        self.lock_hotkey = self.settings.get("lock_hotkey", "Ctrl+Shift+L")
+        
+        if self.stationary_mode_enabled and self.stationary_pin:
+            self.is_locked = True
+            self.show_login_dialog()
+        else:
+            # Initialize GUI if not locked
+            self.setup_pyqt_gui()
+            self.apply_amber_night_theme()
+            self.init_updater() 
+            
+            # Setup system tray
+            self.setup_system_tray()
+            
+            # Setup hotkey for locking
+            self.setup_lock_hotkey()
+            
+            if self.update_client:
+                 QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
+
+    def setup_lock_hotkey(self):
+        """Ustawia skrót klawiszowy blokowania (globalny hotkey)."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            # Define constants
+            MOD_ALT = 0x0001
+            MOD_CONTROL = 0x0002
+            MOD_SHIFT = 0x0004
+            MOD_WIN = 0x0008
+            WM_HOTKEY = 0x0312
+            
+            # Parse hotkey string
+            keys = self.lock_hotkey.split('+')
+            mod = 0
+            vk = 0
+            
+            for key in keys:
+                key = key.strip().upper()
+                if key == 'CTRL':
+                    mod |= MOD_CONTROL
+                elif key == 'SHIFT':
+                    mod |= MOD_SHIFT
+                elif key == 'ALT':
+                    mod |= MOD_ALT
+                elif key == 'WIN':
+                    mod |= MOD_WIN
+                elif key == 'L':
+                    vk = 0x4C  # L key
+                elif key == 'B':
+                    vk = 0x42  # B key
+                elif len(key) == 1 and 'A' <= key <= 'Z':
+                    vk = ord(key)
+            
+            if vk != 0:
+                # Register hotkey
+                user32 = ctypes.windll.user32
+                if not user32.RegisterHotKey(None, 1, mod, vk):
+                    print(f"Nie udało się zarejestrować globalnego skrótu {self.lock_hotkey}")
+                else:
+                    print(f"Zarejestrowano globalny skrót: {self.lock_hotkey}")
+                    self.hotkey_registered = True
+                    
+                    # Ustawiamy timer do sprawdzania hotkeyów
+                    self.hotkey_timer = QTimer()
+                    self.hotkey_timer.timeout.connect(self.check_hotkey)
+                    self.hotkey_timer.start(100)  # Sprawdzaj co 100ms
+                    
+        except Exception as e:
+            print(f"Błąd rejestracji globalnego skrótu: {e}")
+            self.hotkey_registered = False
+
+    def check_hotkey(self):
+        """Sprawdza czy naciśnięto globalny hotkey."""
+        try:
+            import ctypes
+            from ctypes import wintypes
+            
+            class MSG(ctypes.Structure):
+                _fields_ = [("hwnd", wintypes.HWND),
+                           ("message", wintypes.UINT),
+                           ("wParam", wintypes.WPARAM),
+                           ("lParam", wintypes.LPARAM),
+                           ("time", wintypes.DWORD),
+                           ("pt", wintypes.POINT)]
+            
+            msg = MSG()
+            user32 = ctypes.windll.user32
+            
+            # Sprawdź czy jest wiadomość hotkey
+            if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE = 1
+                if msg.message == 0x0312:  # WM_HOTKEY
+                    print("Wykryto naciśnięcie hotkeya!")
+                    self.perform_lock()
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageW(ctypes.byref(msg))
+                    return True
+        except Exception as e:
+            print(f"Błąd sprawdzania hotkeya: {e}")
+        return False
+
+    def show_login_dialog(self):
+        """Show login dialog if stationary mode is enabled and PIN is set"""
+        if not self.stationary_pin:
+            # Jeśli nie ma PIN-u, inicjalizuj normalnie
+            self.is_locked = False
+            self.setup_pyqt_gui()
+            self.apply_amber_night_theme()
+            self.init_updater()
+            self.setup_system_tray()
+            self.setup_lock_hotkey()
+            
+            # Try to load saved session
+            self.load_from_temp_file()
+            
+            self.show()
+            self.activateWindow()
+            self.raise_()
+            
+            if self.update_client:
+                QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
+            return
+            
+        self.login_dialog = UnlockDialog(None, self.stationary_mode_enabled, self.stationary_pin)
+        
+        while True:
+            result = self.login_dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                entered_pin = self.login_dialog.get_pin()
+                
+                if entered_pin == self.stationary_pin:
+                    # PIN correct, unlock and initialize
+                    self.is_locked = False
+                    self.initialize_after_unlock()
+                    break
+                else:
+                    self.login_dialog.show_error("Nieprawidłowy PIN!")
+                    self.login_dialog.pin_input.clear()
+                    self.login_dialog.pin_input.setFocus()
+            else:
+                # User rejected (pressed exit)
+                QApplication.quit()
+                sys.exit(0)
+                break
+
+    def initialize_after_unlock(self):
+        """Initialize application after successful unlock"""
         self.setup_pyqt_gui()
         self.apply_amber_night_theme()
-        self.init_updater() 
+        self.init_updater()
+        self.setup_system_tray()
+        self.setup_lock_hotkey()
+        
+        # Try to load saved session
+        self.load_from_temp_file()
+        
+        self.show()
+        self.activateWindow()
+        self.raise_()
+        
         if self.update_client:
-             QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
+            QTimer.singleShot(5000, lambda: self.check_for_updates(silent=True))
 
     def setup_pyqt_gui(self):
         """Initialize PyQt6 GUI components"""
@@ -149,7 +486,8 @@ class SafePadApp(QMainWindow):
         welcome_text = (
             "Witaj w SafePad 2.0!\n\n"  
             "Użyj Plik -> Nowy (Ctrl+N), aby rozpocząć pisanie,\n"
-            "lub Plik -> Odszyfruj (Ctrl+O), aby otworzyć istniejący plik."
+            "lub Plik -> Odszyfruj (Ctrl+O), aby otworzyć istniejący plik.\n\n"
+            f"Skrót do blokowania: {self.lock_hotkey}"
         )
         self.text_edit.setPlaceholderText(welcome_text)
         self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft) 
@@ -176,15 +514,62 @@ class SafePadApp(QMainWindow):
         self.status_bar = QStatusBar()
         self.status_label = QLabel("Gotowy")
         self.line_col_label = QLabel("Linia: 1, Kolumna: 1")
+        self.hotkey_label = QLabel(f"Blokowanie: {self.lock_hotkey}")
+        self.hotkey_label.setStyleSheet("color: #FFC107; font-weight: bold;")
         
         self.status_bar.addWidget(self.status_label, 1)
         self.status_bar.addPermanentWidget(self.line_col_label)
+        self.status_bar.addPermanentWidget(self.hotkey_label)
         self.setStatusBar(self.status_bar)
         
         # Connect signals
         self.text_edit.cursorPositionChanged.connect(self.update_line_col)
         
         self.create_menu_bar()
+
+    def setup_system_tray(self):
+        """Setup system tray icon and menu"""
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        # Create tray icon from application icon
+        if os.path.exists("safe.ico"):
+            self.tray_icon.setIcon(QIcon("safe.ico"))
+        else:
+            # Create a simple icon if file doesn't exist
+            pixmap = QPixmap(64, 64)
+            pixmap.fill(QColor("#FFC107"))
+            self.tray_icon.setIcon(QIcon(pixmap))
+        
+        # Create tray menu
+        tray_menu = QMenu()
+        
+        show_action = QAction("Pokaż SafePad", self)
+        show_action.triggered.connect(self.show_normal)
+        tray_menu.addAction(show_action)
+        
+        # DODANE: Sprawdzamy czy jest PIN przed dodaniem akcji blokowania
+        if self.stationary_mode_enabled and self.stationary_pin:
+            lock_action = QAction(f"Zablokuj aplikację ({self.lock_hotkey})", self)
+            lock_action.triggered.connect(self.lock_application)
+            tray_menu.addAction(lock_action)
+        
+        tray_menu.addSeparator()
+        
+        exit_action = QAction("Zakończ", self)
+        exit_action.triggered.connect(self.on_exit)
+        tray_menu.addAction(exit_action)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+        self.tray_icon.activated.connect(self.on_tray_icon_activated)
+        self.tray_icon.show()
+        
+        # Set tooltip
+        self.tray_icon.setToolTip(f"SafePad\nBlokowanie: {self.lock_hotkey}")
+
+    def on_tray_icon_activated(self, reason):
+        """Handle tray icon activation"""
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self.show_normal()
 
     def create_menu_bar(self):
         """Create menu bar with PyQt6"""
@@ -229,6 +614,17 @@ class SafePadApp(QMainWindow):
         migrate_action = QAction("Migruj stare pliki...", self)
         migrate_action.triggered.connect(self.migrate_old_files)
         file_menu.addAction(migrate_action)
+        
+        file_menu.addSeparator()
+        
+        # DODANE: Sprawdzamy czy jest PIN przed dodaniem akcji blokowania
+        if self.stationary_mode_enabled and self.stationary_pin:
+            lock_action = QAction(f"Zablokuj aplikację ({self.lock_hotkey})", self)
+            lock_action.setShortcut(self.lock_hotkey)
+            lock_action.triggered.connect(self.lock_application)
+            file_menu.addAction(lock_action)
+        
+        file_menu.addSeparator()
         
         exit_action = QAction("Zakończ", self)
         exit_action.setShortcut("Alt+F4")
@@ -301,7 +697,7 @@ class SafePadApp(QMainWindow):
         self.toolbar.setIconSize(QSize(24, 24))
         self.toolbar.setMovable(False)
         
-        # Toolbar
+        # Toolbar buttons
         buttons = [
             ("Nowy", self.new_file, "📄"),
             ("Otwórz", self.open_file, "📂"),
@@ -314,8 +710,13 @@ class SafePadApp(QMainWindow):
             ("Dodaj zdjęcie", self._insert_image_from_dialog, "🖼️"),
             ("", None, ""),  
             ("Szyfruj", self.save_as_file, "🔒"),
-            ("Odszyfruj", self.open_file, "🔓")
+            ("Odszyfruj", self.open_file, "🔓"),
         ]
+        
+        # DODANE: Sprawdzamy czy jest PIN przed dodaniem przycisku blokowania
+        if self.stationary_mode_enabled and self.stationary_pin:
+            buttons.append(("", None, ""))
+            buttons.append(("🔒 Zablokuj", self.lock_application, f"({self.lock_hotkey})"))
         
         for text, command, icon in buttons:
             if not text:  
@@ -413,6 +814,206 @@ class SafePadApp(QMainWindow):
             }
         """)
 
+    def lock_application(self):
+        """Lock the application with PIN protection"""
+        if self.is_locked:
+            return  # Already locked
+            
+        # Sprawdź czy jest PIN ustawiony
+        if not self.stationary_pin:
+            QMessageBox.warning(self, "Brak PIN-u", "Aby używać blokowania, ustaw PIN w ustawieniach (Tryb stacjonarny).")
+            return
+            
+        # Save current session
+        if self.stationary_mode_enabled and self.text_edit.toPlainText():
+            self.save_to_temp_file()
+        
+        self.is_locked = True
+        self.text_edit.setEnabled(False)
+        self.text_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #1A1A1A;
+                color: #888888;
+                border: none;
+                font-family: Consolas;
+                font-size: 12px;
+            }
+        """)
+        
+        # Disable all actions
+        self.setEnabled(False)
+        
+        # Hide window
+        self.hide()
+        
+        # Show notification
+        self.tray_icon.showMessage(
+            "SafePad Zablokowany",
+            f"Aplikacja została zablokowana. Kliknij dwukrotnie ikonę w zasobniku, aby odblokować.\nSkrót: {self.lock_hotkey}",
+            QSystemTrayIcon.MessageIcon.Information,
+            3000
+        )
+        
+        # Show login dialog
+        self.show_login_dialog_after_lock()
+
+    def show_login_dialog_after_lock(self):
+        """Show login dialog after manual lock"""
+        # Sprawdź czy jest PIN ustawiony
+        if not self.stationary_pin:
+            self.is_locked = False
+            self.setEnabled(True)
+            self.text_edit.setEnabled(True)
+            self.text_edit.setStyleSheet("""
+                QTextEdit {
+                    background-color: #3C3C3C;
+                    color: #FAFAFA;
+                    border: none;
+                    font-family: Consolas;
+                    font-size: 12px;
+                    selection-background-color: #FFC107;
+                    selection-color: #000000;
+                }
+            """)
+            self.show()
+            return
+            
+        self.login_dialog = UnlockDialog(None, self.stationary_mode_enabled, self.stationary_pin)
+        
+        while True:
+            result = self.login_dialog.exec()
+            
+            if result == QDialog.DialogCode.Accepted:
+                entered_pin = self.login_dialog.get_pin()
+                
+                if entered_pin == self.stationary_pin:
+                    # PIN correct, unlock
+                    self.is_locked = False
+                    self.setEnabled(True)
+                    self.text_edit.setEnabled(True)
+                    self.text_edit.setStyleSheet("""
+                        QTextEdit {
+                            background-color: #3C3C3C;
+                            color: #FAFAFA;
+                            border: none;
+                            font-family: Consolas;
+                            font-size: 12px;
+                            selection-background-color: #FFC107;
+                            selection-color: #000000;
+                        }
+                    """)
+                    
+                    # Load session if available
+                    self.load_from_temp_file()
+                    
+                    self.show()
+                    self.activateWindow()
+                    self.raise_()
+                    break
+                else:
+                    self.login_dialog.show_error("Nieprawidłowy PIN!")
+                    self.login_dialog.pin_input.clear()
+                    self.login_dialog.pin_input.setFocus()
+            else:
+                # User rejected, stay locked
+                break
+
+    def unlock_application(self):
+        """Przywraca okno z ukrycia, wymagając hasła."""
+        if self.isVisible():
+            self.activateWindow()
+            return
+
+        current_password = getattr(self, 'password', None)
+        
+        if not current_password:
+            QMessageBox.critical(self, "Błąd", "Błąd sesji. Aplikacja musi zostać zamknięta.")
+            QApplication.instance().quit()
+            return
+
+        dialog = UnlockDialog(self, stationary_pin=current_password)
+        
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.show()
+            self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+            self.activateWindow()
+            
+    def perform_lock(self):
+        """Wykonywana po wciśnięciu skrótu - blokuje lub ukrywa aplikację."""
+        
+        # Sprawdź czy hotkey został zarejestrowany
+        if not self.hotkey_registered:
+            print("Hotkey nie został zarejestrowany!")
+            return
+            
+        # Sprawdź czy aplikacja jest widoczna
+        if not self.isVisible():
+            return
+            
+        is_stealth = self.settings.get("stealth_mode", False) if hasattr(self, 'settings') else False
+
+        if is_stealth:
+            # Tryb ukrycia
+            self.hide()
+            if self.tray_icon:
+                self.tray_icon.showMessage(
+                    "SafePad", "Aplikacja ukryta. Kliknij ikonę w zasobniku, aby przywrócić.",
+                    QSystemTrayIcon.MessageIcon.Information, 2000
+                )
+        else:
+            # Tryb blokowania z PIN-em
+            if self.stationary_mode_enabled and self.stationary_pin:
+                self.hide()
+                
+                # Zapisanie sesji przed blokadą
+                self.save_to_temp_file()
+                
+                # Pokazanie okna odblokowania
+                dialog = UnlockDialog(self, stationary_pin=self.stationary_pin)
+                
+                if dialog.exec() == QDialog.DialogCode.Accepted:
+                    self.show()
+                    self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
+                    self.activateWindow()
+                    
+                    # Przywrócenie sesji po odblokowaniu
+                    self.load_from_temp_file()
+                else:
+                    QApplication.instance().quit()
+            else:
+                # Bez trybu stacjonarnego - tylko ukrycie
+                self.hide()
+
+    def closeEvent(self, event):
+        """Handle window close event"""
+        if self.stationary_mode_enabled and self.settings.get("minimize_to_tray", True):
+            event.ignore()
+            self.hide()
+            
+            # NADPISUJEMY backup przed schowaniem do zasobnika
+            if self.text_edit.document().isModified():
+                self.save_to_temp_file()
+                
+            self.tray_icon.showMessage(
+                "SafePad działa w tle",
+                f"Aplikacja została zminimalizowana do zasobnika systemowego.\nSkrót do blokowania: {self.lock_hotkey}",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000
+            )
+        else:
+            self.on_exit()
+            event.accept()
+
+    def show_normal(self):
+        """Show and unlock the application from tray"""
+        if self.is_locked:
+            # If locked, show login dialog
+            self.show_login_dialog_after_lock()
+        else:
+            self.show()
+            self.activateWindow()
+            self.raise_()
+
     def update_line_col(self):
         """Update line and column information in status bar"""
         
@@ -424,6 +1025,7 @@ class SafePadApp(QMainWindow):
         col = cursor.columnNumber() + 1
         self.line_col_label.setText(f"Linia: {line}, Kolumna: {col}")
         
+    
     def update_status(self, message, is_error=False):
         """Update status bar message"""
         color = "#FF5555" if is_error else "#FAFAFA"
@@ -441,9 +1043,42 @@ class SafePadApp(QMainWindow):
         """Settings window with PyQt6"""
         dialog = SettingsDialog(self, self.settings)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.settings = dialog.get_settings()
+            new_settings = dialog.get_settings()
+            
+            # Update hotkey if changed
+            if new_settings.get("lock_hotkey") != self.lock_hotkey:
+                self.lock_hotkey = new_settings.get("lock_hotkey")
+                self.hotkey_label.setText(f"Blokowanie: {self.lock_hotkey}")
+                
+                # Odrejestruj stary hotkey
+                if self.hotkey_registered:
+                    try:
+                        import ctypes
+                        ctypes.windll.user32.UnregisterHotKey(None, 1)
+                    except:
+                        pass
+                
+                # Zarejestruj nowy hotkey
+                self.setup_lock_hotkey()
+            
+            self.settings = new_settings
             self.save_settings()
             self.initialize_password_requirements()
+            
+            # Update stationary mode settings
+            self.stationary_mode_enabled = self.settings.get("stationary_mode_enabled", False)
+            self.stationary_pin = self.settings.get("stationary_pin")
+            
+            # Update tray tooltip
+            self.tray_icon.setToolTip(f"SafePad\nBlokowanie: {self.lock_hotkey}")
+            
+            # If stationary mode is enabled, save current content to temp file
+            if self.stationary_mode_enabled and self.text_edit.toPlainText():
+                self.save_to_temp_file()
+                
+            # Odśwież menu i toolbar
+            self.create_menu_bar()
+            self.create_toolbar()
 
     def prompt_password(self):
         """Prompt for password with PyQt6"""
@@ -561,15 +1196,26 @@ class SafePadApp(QMainWindow):
 
     def new_file(self):
         """Create new empty file"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         self.text_edit.clear()
         self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.current_file = None
         self.password = None
         self.update_label()
         self.update_status("Nowy plik utworzony")
+        
+        # NADPISUJEMY backup pustą sesją po utworzeniu nowego pliku
+        self._save_empty_backup_on_new()
     
     def open_file(self, file_path=None):
         """Otwiera i odszyfrowuje plik (tylko nowy format v2.0)."""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         if self.is_account_locked():
             self.show_lockout_message()
             return
@@ -606,58 +1252,47 @@ class SafePadApp(QMainWindow):
                 )
 
     def _open_modern_file(self, file_path, password, file_data):
-      """Otwiera plik zaszyfrowany w nowym formacie AEAD (v2.0)."""
-      try:
-          salt = file_data[4:20]
-          nonce = file_data[20:32]
-          encrypted_data = file_data[32:]
+        """Otwiera plik zaszyfrowany w nowym formacie AEAD (v2.0)."""
+        try:
+            salt = file_data[4:20]
+            nonce = file_data[20:32]
+            encrypted_data = file_data[32:]
 
-          key = self.generate_key(password, salt)
-          decrypted_data = self.encryption_handler.decrypt_data(key, nonce, encrypted_data)
-        
-          self.password = password
-
-          self._deserialize_content(decrypted_data)
-          self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
-
-          self.current_file = file_path
-          self.update_label()
-          self.update_status(f"Otwarto: {os.path.basename(file_path)}")
-        
-          #Plik otwarty
-          if self.settings.get("notifications", True):
-              self.send_windows_notification(
-                  "SafePad - Otworzono plik",
-                  f"Plik '{os.path.basename(file_path)}' został odszyfrowany i otwarty.\n"
-                  f"Rozmiar: {self._format_file_size(len(file_data))}",
-                  "info",
-                  3000
-              )
+            key = self.generate_key(password, salt)
+            decrypted_data = self.encryption_handler.decrypt_data(key, nonce, encrypted_data)
             
-          self.reset_login_attempts()
-          self.text_edit.document().setModified(False)
-        
-      except Exception as e:
-          #Błąd otwarcia
-          if self.settings.get("notifications", True):
-              self.send_windows_notification(
-                  "SafePad - Błąd otwarcia",
-                  f"Nie udało się otworzyć pliku:\n{str(e)[:100]}",
-                  "error",
-                  5000
-              )
-            
-          raise ValueError(f"Nieprawidłowe hasło lub plik jest uszkodzony. Szczegóły: {e}")
+            self.password = password
+
+            self._deserialize_content(decrypted_data)
+            self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+            self.current_file = file_path
+            self.update_label()
+            self.update_status(f"Otwarto: {os.path.basename(file_path)}")
+            self.reset_login_attempts()
+            self.text_edit.document().setModified(False)
+        except Exception as e:
+            raise ValueError(f"Nieprawidłowe hasło lub plik jest uszkodzony. Szczegóły: {e}")
     
     def save_file(self):
         """Save current file"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         if hasattr(self, 'current_file') and self.current_file:
-            self._save_current_file(self.current_file) 
+            if self._save_current_file(self.current_file):
+                # Po udanym zapisie NADPISUJEMY backup aktualną zawartością
+                self.save_to_temp_file()
         else:
             self.save_as_file()
 
     def save_as_file(self):
         """Save file with new name"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         try:
             file_path, _ = QFileDialog.getSaveFileName(
                 self, "Zapisz plik jako", "",
@@ -666,65 +1301,49 @@ class SafePadApp(QMainWindow):
             
             if file_path:
                 self.current_file = file_path
-                self._save_current_file(file_path)
-                
+                if self._save_current_file(file_path):
+                    # Po udanym zapisie NADPISUJEMY backup
+                    self.save_to_temp_file()
+                    
         except Exception as e:
             QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać pliku: {str(e)}")
 
     def _save_current_file(self, file_path, migrate=False):
-      try:
-          if not self.password or migrate:
-              password = self._prompt_new_password_with_verification()
-              if not password:
-                  raise ValueError("Hasło jest wymagane!")
-              self.password = password
+        try:
+            if not self.password or migrate:
+                password = self._prompt_new_password_with_verification()
+                if not password:
+                    raise ValueError("Hasło jest wymagane!")
+                self.password = password
 
-          start_time = time.time() 
-        
-          self.salt = os.urandom(self.encryption_handler.get_salt_size())
-          nonce = os.urandom(self.encryption_handler.get_nonce_size())
-
-          data_to_encrypt = self._serialize_content()
-        
-          self.key = self.generate_key(self.password, self.salt)
-          encrypted_data = self.encryption_handler.encrypt_data(self.key, nonce, data_to_encrypt)
-
-          with open(file_path, "wb") as f:
-              f.write(ENCRYPTION_VERSION.encode('utf-8'))
-              f.write(self.salt)
-              f.write(nonce)
-              f.write(encrypted_data)
-        
-          duration = time.time() - start_time
-          file_size = os.path.getsize(file_path)
-
-          self.update_status(f"Zapisano: {os.path.basename(file_path)}")
-          self.text_edit.document().setModified(False)
-        
-          #Plik zapisany
-          if self.settings.get("notifications", True):
-              self.send_windows_notification(
-                  "SafePad - Zapisano plik",
-                  f"Plik '{os.path.basename(file_path)}' został zaszyfrowany.\n"
-                  f"Rozmiar: {self._format_file_size(file_size)}\n"
-                  f"Czas operacji: {duration:.2f}s",
-                  "success",
-                  4000
-              )
-        
-          self.show_file_encryption_success(file_path, duration, file_size)
-        
-      except Exception as e:
-          #Błąd zapisu
-          if self.settings.get("notifications", True):
-              self.send_windows_notification(
-                  "SafePad - Błąd zapisu",
-                  f"Nie udało się zapisać pliku:\n{str(e)[:100]}",
-                  "error",
-                  5000
-              )
+            start_time = time.time() 
             
-          QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać pliku: {str(e)}")
+            self.salt = os.urandom(self.encryption_handler.get_salt_size())
+            nonce = os.urandom(self.encryption_handler.get_nonce_size())
+    
+            data_to_encrypt = self._serialize_content()
+            
+            self.key = self.generate_key(self.password, self.salt)
+            encrypted_data = self.encryption_handler.encrypt_data(self.key, nonce, data_to_encrypt)
+
+            with open(file_path, "wb") as f:
+                f.write(ENCRYPTION_VERSION.encode('utf-8'))
+                f.write(self.salt)
+                f.write(nonce)
+                f.write(encrypted_data)
+            
+            duration = time.time() - start_time
+            file_size = os.path.getsize(file_path)
+
+            self.update_status(f"Zapisano: {os.path.basename(file_path)}")
+            self.text_edit.document().setModified(False)
+            
+            self.show_file_encryption_success(file_path, duration, file_size)
+            return True
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd", f"Nie udało się zapisać pliku: {str(e)}")
+            return False
 
     def generate_key(self, password, salt):
         """Generate encryption key using Argon2"""
@@ -732,6 +1351,10 @@ class SafePadApp(QMainWindow):
 
     def toggle_read_only(self):
         """Toggle read-only mode"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         is_read_only = self.text_edit.isReadOnly()
         self.text_edit.setReadOnly(not is_read_only)
         status = "Tylko do odczytu" if not is_read_only else "Edycja włączona"
@@ -739,103 +1362,18 @@ class SafePadApp(QMainWindow):
 
 
     def toggle_notifications(self):
-      """Toggle notifications on/off"""
-      self.settings["notifications"] = not self.settings.get("notifications", True)
-      self.save_settings()
-    
-      # Inicjalizuj lub wyłącz notifier
-      if self.settings["notifications"]:
-          self.init_windows_notifier()
-        
-          # Wyślij potwierdzenie włączenia
-          QTimer.singleShot(500, lambda: self.send_windows_notification(
-              "SafePad - Powiadomienia",
-              "Powiadomienia Windows zostały włączone.",
-              "info",
-              3000
-          ))
-      else:
-          # Wyślij potwierdzenie wyłączenia (przed wyłączeniem notifiera)
-          if hasattr(self, 'notifier') and self.notifier:
-              self.send_windows_notification(
-                  "SafePad - Powiadomienia",
-                  "Powiadomienia Windows zostały wyłączone.",
-                  "info",
-                  3000
-              )
-          self.notifier = None
-        
-      status = "Powiadomienia wyłączone" if not self.settings["notifications"] else "Powiadomienia włączone"
-      self.update_status(status)
-    
-    def init_windows_notifier(self):
-      """Inicjalizuj system powiadomień Windows"""
-      if WINDOWS_NOTIFICATIONS_AVAILABLE:
-          try:
-              # Znajdź ikonę aplikacji
-              icon_paths = [
-                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "safe.ico"),
-                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "icon.ico"),
-                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "safe.png"),
-              ]
-            
-              icon = None
-              for path in icon_paths:
-                  if os.path.exists(path):
-                      icon = path
-                      break
-            
-              self.notifier = WindowsNotifier("SafePad", icon)
-            
-              if not self.notifier.is_available:
-                  print("UWAGA: win10toast nie jest zainstalowany. Zainstaluj: pip install win10toast")
-                  self.notifier = None
-              else:
-                  print("System powiadomień Windows zainicjalizowany")
-                
-                  # Wyślij powiadomienie powitalne (tylko raz przy starcie)
-                  if self.settings.get("notifications", True):
-                      # Opóźnione powiadomienie, żeby nie przeszkadzało przy starcie
-                      QTimer.singleShot(2000, lambda: self.send_windows_notification(
-                          "SafePad - Gotowy",
-                          f"Aplikacja została uruchomiona.\nWersja: {self.APP_VERSION}",
-                          "info",
-                          3000
-                      ))
-                
-          except Exception as e:
-              print(f"Błąd inicjalizacji systemu powiadomień Windows: {e}")
-              self.notifier = None
-              
-    def send_windows_notification(self, title, message, notification_type="info", duration=5000):
-      """Wyślij powiadomienie Windows (jeśli włączone)"""
-      if (hasattr(self, 'notifier') and self.notifier and 
-          self.settings.get("notifications", True) and
-          hasattr(self.notifier, 'send_notification')):
-        
-          try:
-              # Konwertuj milisekundy na sekundy
-              duration_seconds = max(1, duration // 1000)
-            
-              return self.notifier.send_notification(
-                  title, 
-                  message, 
-                  notification_type, 
-                  duration_seconds,
-                  threaded=True  # W osobnym wątku, żeby nie blokować UI
-              )
-          except Exception as e:
-              print(f"Błąd wysyłania powiadomienia Windows: {e}")
-              return False
-            
-      elif self.settings.get("notifications", True) and not hasattr(self, 'notifier'):
-        # Jeśli powiadomienia włączone ale notifier nie zainicjalizowany
-          print(f"WINDOWS NOTIFICATION (simulated): {title} - {message}")
-        
-      return False
+        """Toggle notifications on/off"""
+        self.settings["notifications"] = not self.settings.get("notifications", True)
+        self.save_settings()
+        status = "Powiadomienia wyłączone" if not self.settings["notifications"] else "Powiadomienia włączone"
+        self.update_status(status)
 
     def change_password(self):
         """Change encryption password"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         if not hasattr(self, 'current_file') or not self.current_file:
             QMessageBox.information(self, "Informacja", "Najpierw otwórz plik, którego hasło chcesz zmienić.")
             return
@@ -946,13 +1484,17 @@ Bezpieczny edytor tekstu z szyfrowaniem AES-GCM i Argon2ID.
 Autor: {self.AUTHOR}
 Format szyfrowania: {ENCRYPTION_VERSION}
 Poziom bezpieczeństwa: {self.encryption_level.capitalize()}
+Tryb stacjonarny: {'Włączony' if self.stationary_mode_enabled else 'Wyłączony'}
+Skrót blokowania: {self.lock_hotkey}
 
 Funkcje:
 - Szyfrowanie plików i folderów
 - Ochrona przed atakami brute force
 - Wsparcie dla obrazów
 - Motywy jasny/ciemny
-- Weryfikacja integralności danych (AEAD)"""
+- Weryfikacja integralności danych (AEAD)
+- Tryb stacjonarny z ochroną PIN
+- Natychmiastowe blokowanie skrótem klawiszowym"""
         
         QMessageBox.about(self, "O programie", about_text)
 
@@ -973,30 +1515,20 @@ Funkcje:
 
     @pyqtSlot()
     def show_update_notification(self):
-      """Pokazuje powiadomienie o gotowej aktualizacji na pasku statusu."""
-      self.update_status("Dostępna nowa wersja!")
-    
-      if self.settings.get("notifications", True):
-          self.send_windows_notification(
-              "SafePad - Dostępna aktualizacja",
-              "Dostępna jest nowa wersja programu!\n"
-              "Kliknij przycisk 'Uruchom ponownie' w pasku statusu,\n"
-              "aby automatycznie zaktualizować aplikację.",
-              "info",
-              10000
-          )
-    
-      self.restart_btn = QPushButton("Uruchom ponownie, aby zaktualizować")
-      self.restart_btn.setStyleSheet("""
-          QPushButton { 
-              background-color: #FFC107; color: #000000; 
-              font-weight: bold; padding: 2px 5px; border-radius: 3px;
-         }
-          QPushButton:hover { background-color: #FFB300; }
-      """)
-      self.restart_btn.clicked.connect(self.apply_update_and_restart)
-    
-      self.status_bar.addPermanentWidget(self.restart_btn)
+        """Pokazuje powiadomienie o gotowej aktualizacji na pasku statusu."""
+        self.update_status("Dostępna nowa wersja!")
+        
+        self.restart_btn = QPushButton("🎁 Uruchom ponownie, aby zaktualizować")
+        self.restart_btn.setStyleSheet("""
+            QPushButton { 
+                background-color: #FFC107; color: #000000; 
+                font-weight: bold; padding: 2px 5px; border-radius: 3px;
+            }
+            QPushButton:hover { background-color: #FFB300; }
+        """)
+        self.restart_btn.clicked.connect(self.apply_update_and_restart)
+        
+        self.status_bar.addPermanentWidget(self.restart_btn)
 
     @pyqtSlot()
     def on_no_update_found(self):
@@ -1019,7 +1551,7 @@ Funkcje:
         self.close() 
 
     def on_exit(self):
-        """Handle application exit"""
+        """Handle application exit (tworzy backup tylko jeśli tryb stacjonarny włączony)."""
         if self.text_edit.document().isModified():
             result = QMessageBox.question(
                 self, "SafePad", "Zapisać zmiany przed zamknięciem?",
@@ -1030,8 +1562,30 @@ Funkcje:
                 return
             if result == QMessageBox.StandardButton.Yes:
                 self.save_file()
+            elif result == QMessageBox.StandardButton.No:
+                # Jeśli użytkownik nie chce zapisać, ale ma niezapisane zmiany
+                # i tryb stacjonarny jest włączony, NADPISUJEMY backup
+                if self.stationary_mode_enabled and self.text_edit.toPlainText():
+                    self.save_to_temp_file()
         
+        # Backup tylko jeśli tryb stacjonarny włączony i są niezapisane zmiany
+        if self.stationary_mode_enabled and self.text_edit.document().isModified():
+            self.save_to_temp_file()
+        
+        # Odrejestruj globalny hotkey przed zamknięciem
+        if hasattr(self, 'hotkey_registered') and self.hotkey_registered:
+            try:
+                import ctypes
+                ctypes.windll.user32.UnregisterHotKey(None, 1)
+            except:
+                pass
+            
+            # Zatrzymaj timer hotkey
+            if hasattr(self, 'hotkey_timer'):
+                self.hotkey_timer.stop()
+    
         self.save_settings()
+        self.tray_icon.hide()
         QApplication.quit()
 
     def load_settings(self):
@@ -1046,6 +1600,10 @@ Funkcje:
             "notifications": True,
             "remind_later": False,
             "encryption_level": "normal",
+            "stationary_mode_enabled": False,
+            "stationary_pin": None,
+            "minimize_to_tray": True,
+            "lock_hotkey": "Ctrl+Shift+L",
             "argon2_params": {
                 "low": {"m": 16 * 1024, "t": 2, "p": 1},
                 "normal": {"m": 64 * 1024, "t": 3, "p": 2},
@@ -1175,9 +1733,120 @@ Funkcje:
         except Exception as e:
             print(f"Błąd w save_security_settings: {e}")
 
+    def save_to_temp_file(self):
+        """Save current content to temporary encrypted file in %TEMP% (z NADPISYWANIEM)."""
+        try:
+            # Używamy folderu %TEMP% zamiast APPDATA
+            temp_dir = tempfile.gettempdir()
+            temp_file = os.path.join(temp_dir, "safepad_session_backup.sscr")
+            
+            # NADPISYWANIE: Zawsze zapisujemy aktualną sesję, zastępując poprzedni backup
+            # Nie sprawdzamy czy plik istnieje - po prostu go tworzymy/NADPISUJEMY
+            self._save_backup_to_file(temp_file)
+            print(f"NADPISANO backup sesji w: {temp_file}")
+                    
+        except Exception as e:
+            print(f"Błąd NADPISYWANIA sesji do temp: {e}")
+
+    def _save_backup_to_file(self, temp_file):
+        """Zapisuje/NADPISUJE backup sesji do określonego pliku."""
+        try:
+            # Use PIN or default password for session backup
+            temp_password = self.stationary_pin or "session_temp_password"
+            
+            # Save current content to temp file
+            if self.text_edit.toPlainText():
+                data_to_encrypt = self._serialize_content()
+                
+                salt = os.urandom(self.encryption_handler.get_salt_size())
+                nonce = os.urandom(self.encryption_handler.get_nonce_size())
+                key = self.generate_key(temp_password, salt)
+                encrypted_data = self.encryption_handler.encrypt_data(key, nonce, data_to_encrypt)
+
+                # NADPISYWANIE: tryb 'wb' zawsze tworzy nowy plik lub NADPISUJE istniejący
+                with open(temp_file, "wb") as f:
+                    f.write(ENCRYPTION_VERSION.encode('utf-8'))
+                    f.write(salt)
+                    f.write(nonce)
+                    f.write(encrypted_data)
+                    
+        except Exception as e:
+            print(f"Błąd NADPISYWANIA backupu: {e}")
+
+    def load_from_temp_file(self):
+        """Load content from temporary encrypted file in %TEMP%."""
+        try:
+            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+            
+            if os.path.exists(temp_file):
+                # Try to open the temp file
+                with open(temp_file, "rb") as f:
+                    file_data = f.read()
+                
+                if len(file_data) >= 32 and file_data[:4].decode('utf-8', errors='ignore') == ENCRYPTION_VERSION:
+                    # Use PIN or default password
+                    temp_password = self.stationary_pin or "session_temp_password"
+                    
+                    try:
+                        salt = file_data[4:20]
+                        nonce = file_data[20:32]
+                        encrypted_data = file_data[32:]
+
+                        key = self.generate_key(temp_password, salt)
+                        decrypted_data = self.encryption_handler.decrypt_data(key, nonce, encrypted_data)
+                        
+                        self._deserialize_content(decrypted_data)
+                        self.text_edit.document().setModified(True)
+                        self.update_status("Sesja przywrócona z backupu")
+                        
+                        return True
+                    except Exception as e:
+                        print(f"Błąd odszyfrowywania sesji z backupu: {e}")
+                        # Jeśli backup jest uszkodzony, NADPISUJEMY go pustym
+                        self._save_empty_backup(temp_file)
+        except Exception as e:
+            print(f"Błąd ładowania sesji z backupu: {e}")
+        
+        return False
+
+    def _save_empty_backup(self, temp_file):
+        """NADPISUJE backup pustą sesją (gdy poprzedni jest uszkodzony)."""
+        try:
+            temp_password = self.stationary_pin or "session_temp_password"
+            
+            # Pusta sesja
+            empty_content = json.dumps([{"type": "text", "content": ""}]).encode('utf-8')
+            
+            salt = os.urandom(self.encryption_handler.get_salt_size())
+            nonce = os.urandom(self.encryption_handler.get_nonce_size())
+            key = self.generate_key(temp_password, salt)
+            encrypted_data = self.encryption_handler.encrypt_data(key, nonce, empty_content)
+
+            # NADPISYWANIE pustą sesją
+            with open(temp_file, "wb") as f:
+                f.write(ENCRYPTION_VERSION.encode('utf-8'))
+                f.write(salt)
+                f.write(nonce)
+                f.write(encrypted_data)
+                
+            print(f"NADPISANO uszkodzony backup pustą sesją")
+        except Exception as e:
+            print(f"Błąd NADPISYWANIA pustego backupu: {e}")
+
+    def _save_empty_backup_on_new(self):
+        """NADPISUJE backup pustą sesją po utworzeniu nowego pliku."""
+        try:
+            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+            self._save_empty_backup(temp_file)
+        except Exception as e:
+            print(f"Błąd NADPISYWANIA backupu po nowym pliku: {e}")
 
     def initiate_folder_encryption(self):
         """Rozpoczyna proces szyfrowania folderu (Windows)"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         folder_path = QFileDialog.getExistingDirectory(self, "Wybierz folder do zaszyfrowania")
         if not folder_path:
             return
@@ -1264,6 +1933,10 @@ Funkcje:
         
     def decrypt_folder(self):
         """Rozpoczyna proces deszyfrowania folderu (Windows)"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         encrypted_path, _ = QFileDialog.getOpenFileName(
             self, "Wybierz zaszyfrowany folder", "",
             "Zaszyfrowane foldery (*.enc);;Wszystkie pliki (*.*)"
@@ -1350,38 +2023,24 @@ Funkcje:
 
     @pyqtSlot(str)
     def on_crypto_finished(self, success_message):
-      """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
-      self.progress_dialog.close()
-      self.update_status(success_message)
-    
-      if self.settings.get("notifications", True):
-          self.send_windows_notification(
-              "SafePad - Operacja zakończona",
-              success_message,
-              "success",
-              4000
-          )
-        
-      QMessageBox.information(self, "Sukces", "Operacja zakończona pomyślnie.")
+        """Slot wywoływany po pomyślnym zakończeniu pracy wątku."""
+        self.progress_dialog.close()
+        self.update_status(success_message)
+        QMessageBox.information(self, "Sukces", "Operacja zakończona pomyślnie.")
 
     @pyqtSlot(str)
     def on_crypto_error(self, error_message):
-      """Slot wywoływany w przypadku błędu w wątku."""
-      self.progress_dialog.close()
-      self.update_status("Błąd operacji na folderze", is_error=True)
-    
-      if self.settings.get("notifications", True):
-          self.send_windows_notification(
-              "SafePad - Błąd operacji",
-              f"Wystąpił błąd: {error_message[:100]}",
-              "error",
-              5000
-          )
-        
-      QMessageBox.critical(self, "Błąd", f"Wystąpił błąd: {error_message}")
+        """Slot wywoływany w przypadku błędu w wątku."""
+        self.progress_dialog.close()
+        self.update_status("Błąd operacji na folderze", is_error=True)
+        QMessageBox.critical(self, "Błąd", f"Wystąpił błąd: {error_message}")
 
     def migrate_old_files(self):
         """Otwiera dedykowane narzędzie do migracji plików."""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         if MigrationTool is None:
             QMessageBox.critical(
                 self, "Błąd", 
@@ -1496,6 +2155,10 @@ Funkcje:
 
     def _insert_image_from_dialog(self):
         """Insert image from file dialog (PyQt6 version)"""
+        if self.is_locked:
+            QMessageBox.warning(self, "Aplikacja zablokowana", "Najpierw odblokuj aplikację!")
+            return
+            
         if not HAS_PIL:
             QMessageBox.critical(self, "Błąd", "Wymagana biblioteka Pillow do obsługi obrazów.")
             return
@@ -1741,6 +2404,7 @@ class SettingsDialog(QDialog):
         self.settings = settings or {}
         self.setup_ui()
         
+        
     def setup_ui(self):
         self.setWindowTitle("Ustawienia SafePad")
         self.setFixedSize(700, 600)
@@ -1811,6 +2475,65 @@ class SettingsDialog(QDialog):
         
         layout.addWidget(requirements_group)
         
+        # Stationary mode settings
+        stationary_group = QGroupBox("Tryb stacjonarny:")
+        stationary_layout = QVBoxLayout(stationary_group)
+        
+        self.stationary_mode_cb = QCheckBox("Włącz tryb stacjonarny")
+        self.stationary_mode_cb.setChecked(self.settings.get("stationary_mode_enabled", False))
+        self.stationary_mode_cb.stateChanged.connect(self.on_stationary_mode_changed)
+        stationary_layout.addWidget(self.stationary_mode_cb)
+        
+        # PIN settings
+        pin_layout = QHBoxLayout()
+        pin_layout.addWidget(QLabel("PIN:"))
+        
+        self.pin_edit = QLineEdit()
+        self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin_edit.setPlaceholderText("Wprowadź PIN (4-6 cyfr)")
+        self.pin_edit.setText(self.settings.get("stationary_pin", ""))
+        self.pin_edit.setEnabled(self.settings.get("stationary_mode_enabled", False))
+        pin_layout.addWidget(self.pin_edit)
+        
+        self.show_pin_btn = QPushButton("👁️")
+        self.show_pin_btn.setMaximumWidth(30)
+        self.show_pin_btn.setCheckable(True)
+        self.show_pin_btn.toggled.connect(self.toggle_pin_visibility)
+        pin_layout.addWidget(self.show_pin_btn)
+        
+        stationary_layout.addLayout(pin_layout)
+        
+        # Lock hotkey settings
+        hotkey_layout = QHBoxLayout()
+        hotkey_layout.addWidget(QLabel("Skrót blokowania:"))
+        
+        self.hotkey_combo = QComboBox()
+        self.hotkey_combo.addItems([
+            "Ctrl+Shift+L",
+            "Ctrl+Alt+L", 
+            "Win+L",
+            "Ctrl+Shift+B",
+            "Ctrl+Alt+B"
+        ])
+        self.hotkey_combo.setCurrentText(self.settings.get("lock_hotkey", "Ctrl+Shift+L"))
+        hotkey_layout.addWidget(self.hotkey_combo)
+        
+        stationary_layout.addLayout(hotkey_layout)
+        
+        # Minimize to tray option
+        self.minimize_to_tray_cb = QCheckBox("Minimalizuj do zasobnika systemowego")
+        self.minimize_to_tray_cb.setChecked(self.settings.get("minimize_to_tray", True))
+        self.minimize_to_tray_cb.setEnabled(self.settings.get("stationary_mode_enabled", False))
+        stationary_layout.addWidget(self.minimize_to_tray_cb)
+        
+        # Info label
+        info_label = QLabel("Tryb stacjonarny zapisuje sesję w szyfrowanym pliku i wymaga PIN-u przy ponownym uruchomieniu.")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: #888888; font-size: 10px;")
+        stationary_layout.addWidget(info_label)
+        
+        layout.addWidget(stationary_group)
+        
         # Encryption level
         encryption_group = QGroupBox("Poziom szyfrowania:")
         encryption_layout = QVBoxLayout(encryption_group)
@@ -1832,6 +2555,19 @@ class SettingsDialog(QDialog):
         
         layout.addWidget(encryption_group)
         layout.addStretch()
+        
+    def on_stationary_mode_changed(self, state):
+        """Enable/disable PIN field based on stationary mode checkbox"""
+        enabled = state == Qt.CheckState.Checked.value
+        self.pin_edit.setEnabled(enabled)
+        self.minimize_to_tray_cb.setEnabled(enabled)
+        
+    def toggle_pin_visibility(self, checked):
+        """Toggle PIN visibility"""
+        if checked:
+            self.pin_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+        else:
+            self.pin_edit.setEchoMode(QLineEdit.EchoMode.Password)
         
     def setup_argon2_tab(self, tab):
         layout = QVBoxLayout(tab)
@@ -1993,6 +2729,13 @@ class SettingsDialog(QDialog):
             "p": self.argon2_para_spin.value()
         }
         
+        # Validate PIN if stationary mode is enabled
+        stationary_pin = self.pin_edit.text()
+        if self.stationary_mode_cb.isChecked() and stationary_pin:
+            if not stationary_pin.isdigit() or len(stationary_pin) < 4 or len(stationary_pin) > 6:
+                QMessageBox.warning(self, "Błąd", "PIN musi składać się z 4-6 cyfr!")
+                stationary_pin = self.settings.get("stationary_pin", "")
+        
         return {
             "password_min_length": self.min_length_spin.value(),
             "password_require_upper": self.require_upper_cb.isChecked(),
@@ -2003,7 +2746,11 @@ class SettingsDialog(QDialog):
             "argon2_params": argon2_params,
             "dark_mode": self.dark_mode_cb.isChecked(),
             "notifications": self.notifications_cb.isChecked(),
-            "remind_later": self.settings.get("remind_later", False)
+            "remind_later": self.settings.get("remind_later", False),
+            "stationary_mode_enabled": self.stationary_mode_cb.isChecked(),
+            "stationary_pin": stationary_pin if self.stationary_mode_cb.isChecked() else None,
+            "minimize_to_tray": self.minimize_to_tray_cb.isChecked(),
+            "lock_hotkey": self.hotkey_combo.currentText()
         }
         
     def apply_theme(self):
@@ -2087,6 +2834,29 @@ class SettingsDialog(QDialog):
                 padding: 2px;
                 border-radius: 3px;
             }
+            QLineEdit {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 2px;
+                border-radius: 3px;
+            }
+            QComboBox {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 2px;
+                border-radius: 3px;
+                min-width: 120px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                image: none;
+                border-left: 1px solid #555555;
+                padding: 5px;
+            }
             QPushButton {
                 background-color: #3C3C3C;
                 color: #FAFAFA;
@@ -2109,10 +2879,11 @@ def main():
     app.setWindowIcon(QIcon("safe.ico")) 
     
     window = SafePadApp()
-    window.showMaximized()
+    
+    # Window is shown from initialize_after_unlock if needed
+    # or directly if no stationary mode
     
     sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
-
