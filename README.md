@@ -1,5 +1,5 @@
 
-# SafePad 🔒
+# SafePad 🔒 - WERSJA DEVELOPERSKA
 
 --------------
 
@@ -43,12 +43,6 @@
 
 ## Instalacja i Uruchomienie 
 
-### Uruchamianie (Windows)
-1.Pobierz SafePad-2.0.1_Windows.exe z:
-
-[Wersja Stabilna V2.0.1](https://github.com/Bleee411/SafePad/releases/tag/Stable)
-
-2.Otwórz SafePad-2.0.1_Windows.exe i gotowe
 
 ### Uruchamianie z kodu żródłowego
 
@@ -85,10 +79,6 @@ Po pobraniu skompilowanej wersji z sekcji "Releases":
     ./SafePad
     ```
     
-## Screenshots
-
-![Ekran główny](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124341.png)
-![Ustawienia](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124355.png)
 
 ## Licencja
 
@@ -96,7 +86,8 @@ Ten projekt jest udostępniany na licencji [MIT](https://choosealicense.com/lice
 
 ## Disclaimer
 
-> **Uwaga:**  
+> **Uwaga:**
+> TO JEST WERSJA DEVELKOPERSKA MOGĄ I WYSTĘPUJĄ BŁĘDY
 > Ten projekt SafePad (autorstwa szofer) jest niezależnym notatnikiem szyfrującym  
 > napisanym w Pythonie na licencji MIT.  
 > Nie jest powiązany z żadnym innym projektem o tej samej nazwie.
