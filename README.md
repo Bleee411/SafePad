@@ -1,5 +1,5 @@
 
-# SafePad 🔒
+# SafePad 🔒 - Wersja Developerska
 
 --------------
 
@@ -37,7 +37,7 @@
 ## 🌍 Platformy
 - 🪟 Windows — pełne wsparcie  
 - 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13) 
-- Gałąź Wersji na Linuxa [Linux Tree](https://github.com/Bleee411/SafePad/tree/Linux)
+- Gałąź Wersji na Linuxa [Linux Tree](https://github.com/Bleee411/SafePad/tree/Linux_DEV)
 
 
 
@@ -82,10 +82,6 @@ Po pobraniu skompilowanej wersji z https://github.com/Bleee411/SafePad/tree/Linu
     ./SafePad
     ```
     
-## Screenshots
-
-![Ekran główny](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124341.png)
-![Ustawienia](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124355.png)
 
 ## Licencja
 
@@ -93,8 +89,9 @@ Ten projekt jest udostępniany na licencji [MIT](https://choosealicense.com/lice
 
 ## Disclaimer
 
-> **Uwaga:**  
-> Ten projekt SafePad (autorstwa szofer) jest niezależnym notatnikiem szyfrującym  
+> **Uwaga:**
+> TO JEST WERSJA DEVELOPERSKA MOGĄ I WYSTĘPUJĄ BŁĘDY
+> Ten projekt SafePad (autorstwa szofer) jest niezależnym notatnikiem szyfrującym
 > napisanym w Pythonie na licencji MIT.  
 > Nie jest powiązany z żadnym innym projektem o tej samej nazwie.
 
