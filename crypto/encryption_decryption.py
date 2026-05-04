@@ -132,6 +132,39 @@ class Registryconf:
         """Pobiera obecny poziom szyfrowania z głównych ustawień."""
         settings = cls._read_config(cls.CONFIG_FILE)
         return settings.get("encryption_level", "medium")
+    
+    
+    @classmethod
+    def save_backup_password(cls, password):
+        """Zapisuje własne hasło do backupów sesji."""
+        settings = cls._read_config(cls.CONFIG_FILE)
+        import base64
+        # Kodowanie base64 dla podstawowego zabezpieczenia (nie jest to silne szyfrowanie)
+        encoded_password = base64.b64encode(password.encode('utf-8')).decode('utf-8')
+        settings["backup_password"] = encoded_password
+        return cls._write_config(cls.CONFIG_FILE, settings)
+    
+    @classmethod
+    def load_backup_password(cls):
+        """Wczytuje własne hasło do backupów sesji."""
+        settings = cls._read_config(cls.CONFIG_FILE)
+        encoded_password = settings.get("backup_password")
+        if encoded_password:
+            import base64
+            try:
+                return base64.b64decode(encoded_password.encode('utf-8')).decode('utf-8')
+            except Exception as e:
+                print(f"Błąd dekodowania hasła backupu: {e}")
+                return None
+        return None
+    
+    @classmethod
+    def delete_backup_password(cls):
+        """Usuwa własne hasło do backupów (przywraca domyślne)."""
+        settings = cls._read_config(cls.CONFIG_FILE)
+        if "backup_password" in settings:
+            del settings["backup_password"]
+        return cls._write_config(cls.CONFIG_FILE, settings)
 
         
         

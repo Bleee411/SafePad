@@ -19,8 +19,10 @@ from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
 from others.others import Argon2Benchmark, is_benchmark_needed
 
-APP_VERSION = "2.1.0"
+APP_VERSION = "2.1.0_h.1"
 AUTHOR = "Szofer"
+
+DEFAULT_BACKUP_PASSWORD = "U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I="
 
 
 class FolderEncryptWorker(QThread):
@@ -210,6 +212,7 @@ class SafePadApp:
         self.password = None
         self.current_file = None
         self.crypto_worker = None
+        self.backup_password = None
         
         # Wczytaj ustawienia
         self.settings = Registryconf.load_settings()
@@ -223,6 +226,8 @@ class SafePadApp:
         
         # Podłącz sygnały
         self.connect_signals()
+        
+        self.load_backup_password()
         
         # Przywróć sesję
         self.load_from_temp_file()
@@ -547,24 +552,48 @@ class SafePadApp:
     
     # ------------------------- Sesja -------------------------
     
+    
+    
+    
+    def load_backup_password(self):
+        """Wczytaj własne hasło do backupów lub użyj domyślnego"""
+        stored_password = Registryconf.load_backup_password()
+        if stored_password:
+            self.backup_password = stored_password
+        else:
+            self.backup_password = DEFAULT_BACKUP_PASSWORD
+    
+    def get_backup_password(self):
+        """Pobierz aktualne hasło do backupów"""
+        if not self.backup_password:
+            self.load_backup_password()
+        return self.backup_password
+    
     def save_to_temp_file(self):
+        """Zapisz sesję do pliku tymczasowego z użyciem własnego hasła"""
         try:
             temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             text = self.gui.text_edit.toPlainText()
             if text:
-                encrypted = self.crypto.encrypt_data("U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I=", text.encode('utf-8'))
+                # Użyj własnego hasła do backupów
+                backup_pwd = self.get_backup_password()
+                encrypted = self.crypto.encrypt_data(backup_pwd, text.encode('utf-8'))
                 with open(temp_file, 'wb') as f:
                     f.write(encrypted)
         except Exception as e:
             print(f"Błąd zapisu sesji: {e}")
     
     def load_from_temp_file(self):
+        """Wczytaj sesję z pliku tymczasowego z użyciem własnego hasła"""
         try:
             temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             if os.path.exists(temp_file):
                 with open(temp_file, 'rb') as f:
                     encrypted = f.read()
-                decrypted = self.crypto.decrypt_data("U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I=", encrypted)
+                
+                # Użyj własnego hasła do backupów
+                backup_pwd = self.get_backup_password()
+                decrypted = self.crypto.decrypt_data(backup_pwd, encrypted)
                 self.gui.text_edit.setPlainText(decrypted.decode('utf-8'))
                 self.gui.update_status("Sesja przywrócona")
         except Exception as e:
@@ -573,22 +602,27 @@ class SafePadApp:
     # ------------------------- Ustawienia -------------------------
     
     def open_settings(self):
+        """Otwórz okno ustawień"""
         from gui.ui import SettingsDialog
         dialog = SettingsDialog(self.gui, self.settings)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             new_settings = dialog.get_settings()
             
-            # Zapisz ustawienia do REJESTRU
+            # Zapisz ustawienia do pliku konfiguracyjnego
             Registryconf.save_settings(new_settings)
             
             # Aktualizuj lokalne ustawienia
             self.settings = new_settings
             
+            # Jeśli hasło do backupów zostało zmienione, przeładuj je
+            if new_settings.get("backup_password_changed"):
+                self.load_backup_password()
+            
             # Aktualizuj szyfrowanie z nowym poziomem
             level = new_settings.get("encryption_level", "medium")
             self.crypto = EncryptionCEO(level)
             
-            self.gui.update_status("Ustawienia zapisane w rejestrze")
+            self.gui.update_status("Ustawienia zapisane")
     
     def show_about(self):
         about_text = f"""SafePad {APP_VERSION}
