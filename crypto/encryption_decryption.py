@@ -6,6 +6,7 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 import argon2
 import winreg
+import base64
 
 # ------------------------------- Konfiguracja Parametrów Argona -------------------------------
 
@@ -58,11 +59,11 @@ class Registryconf:
             print(f"Błąd odczytu Argon2: {e}")
             return cls.DEFAULT_ARGON_PARAMS.get(encryption_level, cls.DEFAULT_ARGON_PARAMS["medium"])
     
-    # ------------------------- NOWE METODY DO ZAPISU USTAWIEŃ -------------------------
+    # ------------------------- Zapisz ustawień -------------------------
     
     @classmethod
     def save_settings(cls, settings):
-        """Zapisuje wszystkie ustawienia aplikacji w rejestrze"""
+        """Zapisuje wszystkie ustawienia aplikacji do rejestru"""
         try:
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, cls.REG_PATH)
             
@@ -172,44 +173,49 @@ class Registryconf:
         
         return default_settings
     
-    @classmethod
-    def save_stationary_pin(cls, pin):
-        """Zapisuje PIN (hash) w rejestrze"""
+    @staticmethod
+    def save_backup_password(password):
         try:
-            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, cls.REG_PATH)
-            import hashlib
-            pin_hash = hashlib.sha256(pin.encode()).hexdigest()
-            winreg.SetValueEx(key, "stationary_pin_hash", 0, winreg.REG_SZ, pin_hash)
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH)
+            # Szyfruj hasło przed zapisaniem (proste zabezpieczenie)
+            encoded_password = base64.b64encode(password.encode()).decode()
+            winreg.SetValueEx(key, "BackupPassword", 0, winreg.REG_SZ, encoded_password)
             winreg.CloseKey(key)
             return True
         except Exception as e:
-            print(f"Błąd zapisu PIN: {e}")
+            print(f"Nie można zapisać hasła do backupów: {e}")
             return False
     
-    @classmethod
-    def check_stationary_pin(cls, pin):
-        """Sprawdza czy PIN jest poprawny"""
+    @staticmethod
+    def load_backup_password():
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, cls.REG_PATH, 0, winreg.KEY_READ)
-            stored_hash, _ = winreg.QueryValueEx(key, "stationary_pin_hash")
-            winreg.CloseKey(key)
-            
-            import hashlib
-            input_hash = hashlib.sha256(pin.encode()).hexdigest()
-            return input_hash == stored_hash
-        except:
-            return False
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH, 0, winreg.KEY_READ)
+            try:
+                encoded_password, _ = winreg.QueryValueEx(key, "BackupPassword")
+                password = base64.b64decode(encoded_password).decode()
+                winreg.CloseKey(key)
+                return password
+            except FileNotFoundError:
+                winreg.CloseKey(key)
+                return None
+        except Exception as e:
+            print(f"Nie można wczytać hasła do backupów: {e}")
+            return None
     
-    @classmethod
-    def remove_stationary_pin(cls):
-        """Usuwa PIN z rejestru"""
+    @staticmethod
+    def delete_backup_password():
         try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, cls.REG_PATH, 0, winreg.KEY_SET_VALUE)
-            winreg.DeleteValue(key, "stationary_pin_hash")
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH, 0, winreg.KEY_SET_VALUE)
+            try:
+                winreg.DeleteValue(key, "BackupPassword")
+            except FileNotFoundError:
+                pass
             winreg.CloseKey(key)
             return True
-        except:
+        except Exception as e:
+            print(f"Nie można usunąć hasła do backupów: {e}")
             return False
+
         
         
 #------------------------------- Szyfrowanie -------------------------------

@@ -33,7 +33,7 @@ class SettingsDialog(QDialog):
     def setup_ui(self):
         """Initialize settings dialog UI"""
         self.setWindowTitle("Ustawienia SafePad")
-        self.setFixedSize(750, 650)
+        self.setFixedSize(750, 700)
         
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -79,6 +79,11 @@ class SettingsDialog(QDialog):
         appearance_tab = QWidget()
         self.setup_appearance_tab(appearance_tab)
         tab_widget.addTab(appearance_tab, "  🎨 Wygląd  ")
+        
+        # Backup tab
+        backup_tab = QWidget()
+        self.setup_backup_tab(backup_tab)
+        tab_widget.addTab(backup_tab, "  💾 Backup  ")
         
         layout.addWidget(tab_widget)
         
@@ -308,6 +313,7 @@ class SettingsDialog(QDialog):
             """)
             self.enc_level_group.addButton(radio)
             encryption_layout.addWidget(radio)
+            # Store references with proper attribute names
             setattr(self, f"enc_level_{level}_radio", radio)
         
         layout.addWidget(encryption_group)
@@ -553,6 +559,341 @@ class SettingsDialog(QDialog):
         layout.addWidget(appearance_group)
         layout.addStretch()
     
+    def setup_backup_tab(self, tab):
+        """Setup backup settings tab"""
+        layout = QVBoxLayout(tab)
+        layout.setSpacing(15)
+        layout.setContentsMargins(15, 15, 15, 15)
+        
+        # Information about backup
+        info_group = QGroupBox("💾 Backup sesji")
+        info_group.setStyleSheet("""
+            QGroupBox {
+                color: #FAFAFA;
+                background-color: #2B2B2B;
+                border: 1px solid #555555;
+                margin-top: 12px;
+                padding-top: 10px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+                background-color: #2B2B2B;
+            }
+        """)
+        info_layout = QVBoxLayout(info_group)
+        info_layout.setContentsMargins(15, 20, 15, 15)
+        
+        info_text = QLabel(
+            "SafePad automatycznie zapisuje twoją sesję przy zamykaniu programu.\n"
+            "Dzięki temu nie stracisz danych nawet przy nieoczekiwanym zamknięciu.\n\n"
+            "Backup jest szyfrowany hasłem. Możesz użyć domyślnego hasła lub\n"
+            "ustawić własne dla większego bezpieczeństwa."
+        )
+        info_text.setWordWrap(True)
+        info_text.setStyleSheet("color: #AAAAAA; font-size: 11px; background: transparent;")
+        info_layout.addWidget(info_text)
+        layout.addWidget(info_group)
+        
+        # Backup password section
+        password_group = QGroupBox("🔑 Hasło do backupów")
+        password_group.setStyleSheet("""
+            QGroupBox {
+                color: #FAFAFA;
+                background-color: #2B2B2B;
+                border: 1px solid #555555;
+                margin-top: 12px;
+                padding-top: 10px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+                background-color: #2B2B2B;
+            }
+        """)
+        password_layout = QVBoxLayout(password_group)
+        password_layout.setSpacing(10)
+        password_layout.setContentsMargins(15, 20, 15, 15)
+        
+        # Current password status
+        self.backup_status_label = QLabel()
+        self.update_backup_status_label()
+        self.backup_status_label.setWordWrap(True)
+        self.backup_status_label.setStyleSheet("""
+            QLabel {
+                color: #FFC107;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 8px;
+                background-color: #3C3C3C;
+                border-radius: 5px;
+            }
+        """)
+        password_layout.addWidget(self.backup_status_label)
+        
+        password_layout.addSpacing(10)
+        
+        # New password fields
+        password_form = QFormLayout()
+        password_form.setSpacing(10)
+        
+        self.new_backup_password = QLineEdit()
+        self.new_backup_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_backup_password.setPlaceholderText("Wprowadź nowe hasło")
+        self.new_backup_password.setStyleSheet("""
+            QLineEdit {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 8px;
+                border-radius: 3px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #FFC107;
+            }
+            QLineEdit::placeholder {
+                color: #888888;
+            }
+        """)
+        password_form.addRow("Nowe hasło:", self.new_backup_password)
+        
+        self.confirm_backup_password = QLineEdit()
+        self.confirm_backup_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_backup_password.setPlaceholderText("Powtórz nowe hasło")
+        self.confirm_backup_password.setStyleSheet("""
+            QLineEdit {
+                background-color: #3C3C3C;
+                color: #FAFAFA;
+                border: 1px solid #555555;
+                padding: 8px;
+                border-radius: 3px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #FFC107;
+            }
+            QLineEdit::placeholder {
+                color: #888888;
+            }
+        """)
+        password_form.addRow("Potwierdź hasło:", self.confirm_backup_password)
+        
+        password_layout.addLayout(password_form)
+        
+        password_layout.addSpacing(10)
+        
+        # Buttons
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(10)
+        
+        self.save_password_btn = QPushButton("💾 Zapisz hasło")
+        self.save_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.save_password_btn.setFixedHeight(40)
+        self.save_password_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #FFC107;
+                color: #000000;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #FFB300;
+            }
+            QPushButton:pressed {
+                background-color: #E0A800;
+            }
+        """)
+        self.save_password_btn.clicked.connect(self.save_backup_password)
+        buttons_layout.addWidget(self.save_password_btn)
+        
+        self.reset_password_btn = QPushButton("🔄 Przywróć domyślne")
+        self.reset_password_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reset_password_btn.setFixedHeight(40)
+        self.reset_password_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #555555;
+                color: #FAFAFA;
+                border: none;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #777777;
+            }
+            QPushButton:pressed {
+                background-color: #444444;
+            }
+        """)
+        self.reset_password_btn.clicked.connect(self.reset_backup_password)
+        buttons_layout.addWidget(self.reset_password_btn)
+        
+        password_layout.addLayout(buttons_layout)
+        
+        layout.addWidget(password_group)
+        
+        # Security tips
+        tips_group = QGroupBox("💡 Wskazówki bezpieczeństwa")
+        tips_group.setStyleSheet("""
+            QGroupBox {
+                color: #FAFAFA;
+                background-color: #2B2B2B;
+                border: 1px solid #555555;
+                margin-top: 12px;
+                padding-top: 10px;
+                font-weight: bold;
+                border-radius: 5px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 0 5px;
+                left: 10px;
+                background-color: #2B2B2B;
+            }
+        """)
+        tips_layout = QVBoxLayout(tips_group)
+        tips_layout.setContentsMargins(15, 20, 15, 15)
+        
+        tips_text = QLabel(
+            "• Użyj silnego, unikalnego hasła do backupów\n"
+            "• Nie używaj tego samego hasła co do plików\n"
+            "• Zapamiętaj swoje hasło - nie ma opcji odzyskiwania\n"
+            "• Domyślne hasło jest bezpieczne, ale mniej prywatne\n"
+            "• Backup jest zapisywany w folderze tymczasowym systemu"
+        )
+        tips_text.setWordWrap(True)
+        tips_text.setStyleSheet("color: #AAAAAA; font-size: 11px; background: transparent;")
+        tips_layout.addWidget(tips_text)
+        layout.addWidget(tips_group)
+        
+        layout.addStretch()
+    
+    def update_backup_status_label(self):
+        """Update the backup password status label"""
+        try:
+            from crypto.encryption_decryption import Registryconf
+            stored_password = Registryconf.load_backup_password()
+            
+            if stored_password:
+                self.backup_status_label.setText(
+                    "✅ Status: Używasz własnego hasła do backupów"
+                )
+            else:
+                self.backup_status_label.setText(
+                    "ℹ️ Status: Używasz domyślnego hasła do backupów\n"
+                    "   (zalecane ustawienie własnego hasła)"
+                )
+        except:
+            self.backup_status_label.setText(
+                "⚠️ Status: Nie można sprawdzić statusu hasła"
+            )
+    
+    def save_backup_password(self):
+        """Save new backup password"""
+        new_password = self.new_backup_password.text()
+        confirm_password = self.confirm_backup_password.text()
+        
+        if not new_password:
+            QMessageBox.warning(self, "Uwaga", "Wprowadź nowe hasło!")
+            return
+        
+        if new_password != confirm_password:
+            QMessageBox.critical(
+                self, 
+                "Błąd", 
+                "Hasła nie są identyczne!\n\nWprowadź takie same hasło w obu polach."
+            )
+            self.confirm_backup_password.clear()
+            self.confirm_backup_password.setFocus()
+            return
+        
+        if len(new_password) < 6:
+            reply = QMessageBox.question(
+                self,
+                "Słabe hasło",
+                "Hasło ma mniej niż 6 znaków. Może być słabe.\n\n"
+                "Czy na pewno chcesz użyć tego hasła?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.No:
+                return
+        
+        try:
+            from crypto.encryption_decryption import Registryconf
+            Registryconf.save_backup_password(new_password)
+            
+            self.new_backup_password.clear()
+            self.confirm_backup_password.clear()
+            
+            self.update_backup_status_label()
+            
+            # Informuj, że hasło zostało zmienione
+            self.backup_password_changed = True
+            
+            QMessageBox.information(
+                self,
+                "Sukces",
+                "✅ Hasło do backupów zostało zapisane!\n\n"
+                "Nowe hasło będzie używane przy następnym backupie sesji.\n"
+                "Pamiętaj, aby je zapamiętać - nie ma opcji odzyskiwania!"
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Błąd",
+                f"Nie udało się zapisać hasła:\n\n{str(e)}"
+            )
+    
+    def reset_backup_password(self):
+        """Reset backup password to default"""
+        reply = QMessageBox.question(
+            self,
+            "Przywróć domyślne hasło",
+            "Czy na pewno chcesz przywrócić domyślne hasło do backupów?\n\n"
+            "Twoje własne hasło zostanie usunięte.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        
+        if reply == QMessageBox.StandardButton.No:
+            return
+        
+        try:
+            from crypto.encryption_decryption import Registryconf
+            Registryconf.delete_backup_password()
+            
+            self.new_backup_password.clear()
+            self.confirm_backup_password.clear()
+            
+            self.update_backup_status_label()
+            
+            # Informuj, że hasło zostało zmienione
+            self.backup_password_changed = True
+            
+            QMessageBox.information(
+                self,
+                "Sukces",
+                "✅ Przywrócono domyślne hasło do backupów!\n\n"
+                "Backupy będą teraz szyfrowane domyślnym hasłem."
+            )
+            
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Błąd",
+                f"Nie udało się przywrócić domyślnego hasła:\n\n{str(e)}"
+            )
+    
     def run_benchmark(self):
         """Run Argon2ID benchmark"""
         try:
@@ -560,7 +901,6 @@ class SettingsDialog(QDialog):
             from crypto.encryption_decryption import Registryconf
             from PyQt6.QtCore import QThread, pyqtSignal
             
-            # Progress dialog
             self.benchmark_progress = QProgressDialog("Przygotowywanie benchmarku...", "Anuluj", 0, 100, self)
             self.benchmark_progress.setWindowTitle("Benchmark Argon2ID")
             self.benchmark_progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -596,7 +936,6 @@ class SettingsDialog(QDialog):
                 }
             """)
             
-            # Benchmark thread
             class BenchmarkThread(QThread):
                 progress = pyqtSignal(int)
                 status = pyqtSignal(str)
@@ -636,10 +975,8 @@ class SettingsDialog(QDialog):
         
         self.benchmark_progress.close()
         
-        # Save results to registry
         Argon2Benchmark.save_benchmark_results(Registryconf, results)
         
-        # Update displayed parameters
         current_level = self.settings.get("encryption_level", "normal")
         current_params = Registryconf.load_argon_conf(current_level)
         
@@ -647,7 +984,6 @@ class SettingsDialog(QDialog):
         self.current_time_label.setText(str(current_params.get('t', 3)))
         self.current_parallel_label.setText(str(current_params.get('p', 2)))
         
-        # Show results
         levels = Argon2Benchmark.get_level_params(results)
         
         msg = QMessageBox(self)
@@ -713,7 +1049,8 @@ class SettingsDialog(QDialog):
             "encryption_level": encryption_level,
             "dark_mode": self.dark_mode_cb.isChecked(),
             "notifications": self.notifications_cb.isChecked(),
-            "remind_later": self.settings.get("remind_later", False)
+            "remind_later": self.settings.get("remind_later", False),
+            "backup_password_changed": getattr(self, 'backup_password_changed', False)
         }
     
     def apply_theme(self):
