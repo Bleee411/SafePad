@@ -284,7 +284,7 @@ class SettingsDialog(QDialog):
         levels = [
             ("🟢 Niski (szybszy, mniej pamięci)", "low"),
             ("🟡 Normalny (zalecany)", "normal"), 
-            ("🔴 Wysoki (najbezpieczniejszy, wolniejszy)", "high")
+            ("🔴 Wysoki (Używa AES-256-GCM i Serpent-256-CBC do szyfrowania , wolniejszy)", "high")
         ]
         
         current_level = self.settings.get("encryption_level", "normal")

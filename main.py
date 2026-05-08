@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.1.0
+Wersja: 2.2.0-BETA.1
 """
 
 import sys
@@ -14,12 +14,14 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QFileDialog, QInputDialog, 
                              QProgressDialog, QLineEdit, QDialog, QPushButton)
 from PyQt6.QtGui import QIcon
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
 
 from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
 from others.others import Argon2Benchmark, is_benchmark_needed
 
-APP_VERSION = "2.1.0_h.1"
+APP_VERSION = "2.2.0-BETA.1"
 AUTHOR = "Szofer"
 
 DEFAULT_BACKUP_PASSWORD = "U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I="
@@ -40,38 +42,90 @@ class FolderEncryptWorker(QThread):
         self.CHUNK_SIZE = 50 * 1024 * 1024
     
     def run(self):
-        try:
-            self.status.emit("Pakowanie plików...")
+      try:
+        self.status.emit("Pakowanie plików...")
+        
+        temp_dir = tempfile.mkdtemp()
+        temp_zip = os.path.join(temp_dir, "temp_folder.zip")
+        
+        all_files = []
+        total_size = 0
+        for root, dirs, files in os.walk(self.folder_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_size = os.path.getsize(file_path)
+                total_size += file_size
+                arcname = os.path.relpath(file_path, self.folder_path)
+                all_files.append((file_path, arcname, file_size))
+        
+        if not all_files:
+            raise Exception("Folder jest pusty!")
+        
+        processed_size = 0
+        with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_STORED) as zipf:
+            for file_path, arcname, file_size in all_files:
+                zipf.write(file_path, arcname)
+                processed_size += file_size
+                if total_size > 0:
+                    self.progress.emit(int((processed_size / total_size) * 30))
+        
+        self.status.emit("Szyfrowanie danych...")
+        
+        file_size = os.path.getsize(temp_zip)
+        num_chunks = (file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
+        
+        if self.crypto.use_cascade:
+            # ===== SZYFROWANIE KASKADOWE AES-GCM + SERPENT-CBC =====
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            from pyserpent import serpent_cbc_encrypt
             
-            temp_dir = tempfile.mkdtemp()
-            temp_zip = os.path.join(temp_dir, "temp_folder.zip")
+            # Generuj klucze i parametry dla AES
+            aes_salt = os.urandom(self.crypto.SALT_SIZE)
+            aes_nonce_base = os.urandom(self.crypto.NONCE_SIZE)
+            aes_key = self.crypto.generate_key(self.password, aes_salt)
             
-            all_files = []
-            total_size = 0
-            for root, dirs, files in os.walk(self.folder_path):
-                for file in files:
-                    file_path = os.path.join(root, file)
-                    file_size = os.path.getsize(file_path)
-                    total_size += file_size
-                    arcname = os.path.relpath(file_path, self.folder_path)
-                    all_files.append((file_path, arcname, file_size))
+            # Generuj klucze i parametry dla Serpent (inne!)
+            serpent_salt = os.urandom(self.crypto.SALT_SIZE)
+            serpent_key = self.crypto.generate_serpent_key(self.password, serpent_salt)
             
-            if not all_files:
-                raise Exception("Folder jest pusty!")
-            
-            processed_size = 0
-            with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_STORED) as zipf:
-                for file_path, arcname, file_size in all_files:
-                    zipf.write(file_path, arcname)
-                    processed_size += file_size
-                    if total_size > 0:
-                        self.progress.emit(int((processed_size / total_size) * 30))
-            
-            self.status.emit("Szyfrowanie danych...")
-            
-            file_size = os.path.getsize(temp_zip)
-            num_chunks = (file_size + self.CHUNK_SIZE - 1) // self.CHUNK_SIZE
-            
+            with open(temp_zip, 'rb') as f_in:
+                with open(self.output_path, 'wb') as f_out:
+                    # Nagłówek kaskadowy V3.0
+                    f_out.write(self.crypto.CASCADE_VERSION.encode('utf-8'))
+                    f_out.write(aes_salt)           # 16 bajtów
+                    f_out.write(aes_nonce_base)     # 12 bajtów
+                    f_out.write(serpent_salt)       # 16 bajtów
+                    f_out.write(num_chunks.to_bytes(8, 'big'))
+                    
+                    aesgcm = AESGCM(aes_key)
+                    
+                    processed = 0
+                    for chunk_idx in range(num_chunks):
+                        chunk = f_in.read(self.CHUNK_SIZE)
+                        if not chunk:
+                            break
+                        
+                        # Krok 1: Szyfrowanie AES-GCM
+                        aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, 'big')
+                        aes_encrypted = aesgcm.encrypt(aes_nonce, chunk, None)
+                        
+                        # Krok 2: Przygotowanie do Serpent (IV + padding + dane)
+                        chunk_iv = os.urandom(self.crypto.SERPENT_BLOCK_SIZE)  # Unikalne IV dla każdego chunka
+                        padded_data = self.crypto._pad_pkcs7(aes_encrypted, self.crypto.SERPENT_BLOCK_SIZE)
+                        combined_data = chunk_iv + padded_data  # IV + dane
+                        
+                        # Krok 3: Szyfrowanie Serpent-CBC
+                        serpent_encrypted = serpent_cbc_encrypt(serpent_key, combined_data)
+                        
+                        # Zapisz chunk
+                        f_out.write(len(serpent_encrypted).to_bytes(4, 'big'))
+                        f_out.write(serpent_encrypted)
+                        
+                        processed += len(chunk)
+                        if file_size > 0:
+                            self.progress.emit(30 + int((processed / file_size) * 60))
+        else:
+            # ===== STANDARDOWE SZYFROWANIE AES-GCM =====
             salt = os.urandom(self.crypto.SALT_SIZE)
             nonce_base = os.urandom(self.crypto.NONCE_SIZE)
             key = self.crypto.generate_key(self.password, salt)
@@ -101,25 +155,16 @@ class FolderEncryptWorker(QThread):
                         processed += len(chunk)
                         if file_size > 0:
                             self.progress.emit(30 + int((processed / file_size) * 60))
-            
-            self._secure_delete(temp_zip)
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            
-            self.progress.emit(100)
-            self.finished.emit(f"Folder zaszyfrowany: {os.path.basename(self.output_path)}")
-            
-        except Exception as e:
-            self.error.emit(str(e))
-    
-    def _secure_delete(self, file_path):
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, 'wb') as f:
-                    f.write(b'\x00' * os.path.getsize(file_path))
-                os.remove(file_path)
-            except:
-                pass
-
+        
+        # Bezpieczne usunięcie pliku tymczasowego ZIP
+        self._secure_delete(temp_zip)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        self.progress.emit(100)
+        self.finished.emit(f"Folder zaszyfrowany: {os.path.basename(self.output_path)}")
+        
+      except Exception as e:
+        self.error.emit(str(e))
 
 class FolderDecryptWorker(QThread):
     progress = pyqtSignal(int)
@@ -140,60 +185,124 @@ class FolderDecryptWorker(QThread):
             self.status.emit("Odczytywanie pliku...")
             
             with open(self.encrypted_path, 'rb') as f_in:
+                # Sprawdź wersję
                 version = f_in.read(4).decode('utf-8')
-                if version != self.crypto.ENCRYPTION_VERSION:
+                
+                if version == self.crypto.CASCADE_VERSION:
+                    self._decrypt_cascade(f_in)
+                elif version == self.crypto.ENCRYPTION_VERSION:
+                    self._decrypt_aes(f_in)
+                else:
                     raise ValueError(f"Nieobsługiwana wersja: {version}")
-                
-                salt = f_in.read(16)
-                nonce_base = f_in.read(12)
-                num_chunks = int.from_bytes(f_in.read(8), 'big')
-                
-                self.progress.emit(10)
-                self.status.emit("Deszyfrowanie danych...")
-                
-                key = self.crypto.generate_key(self.password, salt)
-                
-                temp_dir = tempfile.mkdtemp()
-                temp_zip = os.path.join(temp_dir, "temp_folder.zip")
-                
-                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-                aesgcm = AESGCM(key)
-                
-                with open(temp_zip, 'wb') as f_out:
-                    for chunk_idx in range(num_chunks):
-                        chunk_len = int.from_bytes(f_in.read(4), 'big')
-                        encrypted_chunk = f_in.read(chunk_len)
-                        
-                        nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
-                        decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
-                        f_out.write(decrypted_chunk)
-                        
-                        if num_chunks > 0:
-                            self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-                
-                self.status.emit("Wypakowywanie plików...")
-                
-                if not zipfile.is_zipfile(temp_zip):
-                    raise ValueError("Odszyfrowane dane nie są prawidłowym archiwum ZIP")
-                
-                with zipfile.ZipFile(temp_zip, 'r') as zipf:
-                    files = zipf.namelist()
-                    for i, name in enumerate(files):
-                        safe_path = os.path.normpath(os.path.join(self.output_folder, name))
-                        if not safe_path.startswith(os.path.normpath(self.output_folder)):
-                            raise ValueError("Wykryto niebezpieczną ścieżkę w archiwum")
-                        
-                        zipf.extract(name, self.output_folder)
-                        self.progress.emit(50 + int(((i + 1) / len(files)) * 50))
-                
-                self._secure_delete(temp_zip)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            
-            self.progress.emit(100)
-            self.finished.emit(f"Folder odszyfrowany do: {os.path.basename(self.output_folder)}")
             
         except Exception as e:
             self.error.emit(str(e))
+    
+    def _decrypt_aes(self, f_in):
+        """Standardowe odszyfrowywanie AES-GCM"""
+        salt = f_in.read(16)
+        nonce_base = f_in.read(12)
+        num_chunks = int.from_bytes(f_in.read(8), 'big')
+        
+        self.progress.emit(10)
+        self.status.emit("Deszyfrowanie danych...")
+        
+        key = self.crypto.generate_key(self.password, salt)
+        
+        temp_dir = tempfile.mkdtemp()
+        temp_zip = os.path.join(temp_dir, "temp_folder.zip")
+        
+        aesgcm = AESGCM(key)
+        
+        with open(temp_zip, 'wb') as f_out:
+            for chunk_idx in range(num_chunks):
+                chunk_len = int.from_bytes(f_in.read(4), 'big')
+                encrypted_chunk = f_in.read(chunk_len)
+                
+                nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
+                decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
+                f_out.write(decrypted_chunk)
+                
+                if num_chunks > 0:
+                    self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
+        
+        self._extract_zip(temp_zip)
+    
+    def _decrypt_cascade(self, f_in):
+      """Odszyfrowywanie kaskadowe"""
+      aes_salt = f_in.read(16)
+      aes_nonce_base = f_in.read(12)
+      serpent_salt = f_in.read(16)
+      num_chunks = int.from_bytes(f_in.read(8), 'big')
+    
+      self.progress.emit(10)
+      self.status.emit("Deszyfrowanie kaskadowe...")
+    
+      aes_key = self.crypto.generate_key(self.password, aes_salt)
+      serpent_key = self.crypto.generate_serpent_key(self.password, serpent_salt)
+    
+      temp_dir = tempfile.mkdtemp()
+      temp_zip = os.path.join(temp_dir, "temp_folder.zip")
+    
+      from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+      aesgcm = AESGCM(aes_key)
+    
+      with open(temp_zip, 'wb') as f_out:
+        for chunk_idx in range(num_chunks):
+            chunk_len = int.from_bytes(f_in.read(4), 'big')
+            serpent_encrypted = f_in.read(chunk_len)
+            
+            # Krok 1: Odszyfruj Serpent
+            try:
+                decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
+                
+                # Wyciągnij IV i dane
+                # IV jest na pierwszych 16 bajtach
+                chunk_iv = decrypted_combined[:16]
+                padded_aes = decrypted_combined[16:]
+                
+                # Usuń padding
+                aes_encrypted = self.crypto._unpad_pkcs7(padded_aes)
+                
+            except Exception as e:
+                raise ValueError(f"Błąd deszyfrowania Serpent: {e}")
+            
+            # Krok 2: Odszyfruj AES
+            aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, 'big')
+            try:
+                decrypted_chunk = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
+                f_out.write(decrypted_chunk)
+            except Exception as e:
+                raise ValueError(f"Błąd deszyfrowania AES: {e}")
+            
+            if num_chunks > 0:
+                self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
+    
+      self._extract_zip(temp_zip)
+    
+    def _extract_zip(self, temp_zip):
+        """Wypakowuje pliki ZIP i czyści"""
+        self.status.emit("Wypakowywanie plików...")
+        
+        if not zipfile.is_zipfile(temp_zip):
+            raise ValueError("Odszyfrowane dane nie są prawidłowym archiwum ZIP")
+        
+        with zipfile.ZipFile(temp_zip, 'r') as zipf:
+            files = zipf.namelist()
+            for i, name in enumerate(files):
+                safe_path = os.path.normpath(os.path.join(self.output_folder, name))
+                if not safe_path.startswith(os.path.normpath(self.output_folder)):
+                    raise ValueError("Wykryto niebezpieczną ścieżkę w archiwum")
+                
+                zipf.extract(name, self.output_folder)
+                self.progress.emit(50 + int(((i + 1) / len(files)) * 50))
+        
+        self._secure_delete(temp_zip)
+        temp_dir = os.path.dirname(temp_zip)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
+        self.progress.emit(100)
+        self.finished.emit(f"Folder odszyfrowany do: {os.path.basename(self.output_folder)}")
     
     def _secure_delete(self, file_path):
         if os.path.exists(file_path):
@@ -203,7 +312,6 @@ class FolderDecryptWorker(QThread):
                 os.remove(file_path)
             except:
                 pass
-
 
 class SafePadApp:
     """Główna klasa aplikacji - łączy GUI z logiką"""
