@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.0-BETA.1
+Wersja: 2.2.0-BETA.2
 """
 
 import sys
@@ -16,12 +16,16 @@ from PyQt6.QtWidgets import (QApplication, QMessageBox, QFileDialog, QInputDialo
 from PyQt6.QtGui import QIcon
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
+from PyQt6.QtGui import QAction
 
+from others.languages import LanguageManager
+import subprocess
+from others.languages import tr, format_tr, LanguageManager
 from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
 from others.others import Argon2Benchmark, is_benchmark_needed
 
-APP_VERSION = "2.2.0-BETA.1"
+APP_VERSION = "2.2.0-BETA.2"
 AUTHOR = "Szofer"
 
 DEFAULT_BACKUP_PASSWORD = "U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I="
@@ -347,96 +351,94 @@ class SafePadApp:
         self.init_argon_params()
     
     def connect_signals(self):
-        """Podłącz wszystkie sygnały z GUI"""
-        
-        # === MENU "Plik" ===
-        for action in self.gui.menuBar().actions():
-            if action.text() == "Plik":
-                for act in action.menu().actions():
-                    text = act.text()
-                    if text == "Nowy":
-                        act.triggered.connect(self.new_file)
-                    elif text == "Otwórz...":
-                        act.triggered.connect(self.open_file)
-                    elif text == "Zapisz...":
-                        act.triggered.connect(self.save_file)
-                    elif text == "Tryb tylko do odczytu":
-                        act.triggered.connect(self.toggle_read_only)
-                    elif text == "Zaszyfruj folder":
-                        act.triggered.connect(self.encrypt_folder)
-                    elif text == "Odszyfruj folder":
-                        act.triggered.connect(self.decrypt_folder)
-                    elif text == "Zakończ":
-                        act.triggered.connect(self.on_exit)
-                break
-        
-        # === MENU "Edycja" ===
-        for action in self.gui.menuBar().actions():
-            if action.text() == "Edycja":
-                for act in action.menu().actions():
-                    text = act.text()
-                    if text == "Cofnij":
-                        act.triggered.connect(self.gui.text_edit.undo)
-                    elif text == "Ponów":
-                        act.triggered.connect(self.gui.text_edit.redo)
-                    elif text == "Wytnij":
-                        act.triggered.connect(self.gui.text_edit.cut)
-                    elif text == "Kopiuj":
-                        act.triggered.connect(self.gui.text_edit.copy)
-                    elif text == "Wklej":
-                        act.triggered.connect(self.gui.text_edit.paste)
-                    elif text == "Zaznacz wszystko":
-                        act.triggered.connect(self.gui.text_edit.selectAll)
-                break
-        
-        # === MENU "Ustawienia" ===
-        for action in self.gui.menuBar().actions():
-            if action.text() == "Ustawienia":
-                for act in action.menu().actions():
-                    if act.text() == "Panel ustawień":
-                        act.triggered.connect(self.open_settings)
-                break
-        
-        # === MENU "Pomoc" ===
-        for action in self.gui.menuBar().actions():
-            if action.text() == "Pomoc":
-                for act in action.menu().actions():
-                    if act.text() == "O programie":
-                        act.triggered.connect(self.show_about)
-                break
-        
-        # === TOOLBAR ===
-        for btn in self.gui.toolbar.findChildren(QPushButton):
-            text = btn.text()
-            if "Nowy" in text:
-                btn.clicked.connect(self.new_file)
-            elif "Otwórz" in text:
-                btn.clicked.connect(self.open_file)
-            elif "Zapisz" in text:
-                btn.clicked.connect(self.save_file)
-            elif "Wytnij" in text:
-                btn.clicked.connect(self.gui.text_edit.cut)
-            elif "Kopiuj" in text:
-                btn.clicked.connect(self.gui.text_edit.copy)
-            elif "Wklej" in text:
-                btn.clicked.connect(self.gui.text_edit.paste)
-        
-        # === SYSTEM TRAY ===
-        if hasattr(self.gui, 'tray_icon') and self.gui.tray_icon:
-            for action in self.gui.tray_icon.contextMenu().actions():
-                text = action.text()
-                if text == "Pokaż SafePad":
-                    action.triggered.connect(self.show_normal)
-                elif text == "Zakończ":
-                    action.triggered.connect(self.on_exit)
+      """Podłącz wszystkie sygnały z GUI - używając referencji do obiektów"""
     
-    def init_argon_params(self):
-        """Inicjalizuje domyślne parametry Argon2 w rejestrze"""
-        for level, params in Registryconf.DEFAULT_ARGON_PARAMS.items():
-            # Sprawdź czy istnieją, jeśli nie - zapisz
-            existing = Registryconf.load_argon_conf(level)
-            if existing == Registryconf.DEFAULT_ARGON_PARAMS.get(level):
-                Registryconf.save_argon_conf(level, params)
+      # === MENU "Plik" ===
+      if hasattr(self.gui, 'new_action'):
+          self.gui.new_action.triggered.connect(self.new_file)
+          self.gui.open_action.triggered.connect(self.open_file)
+          self.gui.save_action.triggered.connect(self.save_file)
+          self.gui.read_only_action.triggered.connect(self.toggle_read_only)
+          self.gui.encrypt_folder_action.triggered.connect(self.encrypt_folder)
+          self.gui.decrypt_folder_action.triggered.connect(self.decrypt_folder)
+          self.gui.exit_action.triggered.connect(self.on_exit)
+    
+      # === MENU "Edycja" ===
+      if hasattr(self.gui, 'undo_action'):
+          self.gui.undo_action.triggered.connect(self.gui.text_edit.undo)
+          self.gui.redo_action.triggered.connect(self.gui.text_edit.redo)
+          self.gui.cut_action.triggered.connect(self.gui.text_edit.cut)
+          self.gui.copy_action.triggered.connect(self.gui.text_edit.copy)
+          self.gui.paste_action.triggered.connect(self.gui.text_edit.paste)
+          self.gui.select_all_action.triggered.connect(self.gui.text_edit.selectAll)
+    
+      # === MENU "Ustawienia" ===
+      if hasattr(self.gui, 'settings_panel_action'):
+          self.gui.settings_panel_action.triggered.connect(self.open_settings)
+    
+      # === MENU "Pomoc" ===
+      if hasattr(self.gui, 'about_action'):
+          self.gui.about_action.triggered.connect(self.show_about)
+    
+      # === MENU "Język" ===
+      if hasattr(self.gui, 'language_actions'):
+          for code, action in self.gui.language_actions.items():
+              try:
+                  action.triggered.disconnect()
+              except:
+                  pass
+              action.triggered.connect(lambda checked, c=code: self.change_language(c))
+    
+      # === TOOLBAR ===
+      if hasattr(self.gui, 'toolbar_buttons'):
+          buttons = self.gui.toolbar_buttons
+          if len(buttons) > 0 and buttons[0]:
+              buttons[0].clicked.connect(self.new_file)
+          if len(buttons) > 1 and buttons[1]:
+              buttons[1].clicked.connect(self.open_file)
+          if len(buttons) > 2 and buttons[2]:
+              buttons[2].clicked.connect(self.save_file)
+          if len(buttons) > 4 and buttons[4]:
+              buttons[4].clicked.connect(self.gui.text_edit.cut)
+          if len(buttons) > 5 and buttons[5]:
+              buttons[5].clicked.connect(self.gui.text_edit.copy)
+          if len(buttons) > 6 and buttons[6]:
+              buttons[6].clicked.connect(self.gui.text_edit.paste)
+    
+      # === SYSTEM TRAY ===
+      if hasattr(self.gui, 'tray_icon') and self.gui.tray_icon:
+          pass
+    
+                
+    def change_language(self, language_code):
+      """Change application language without restart"""
+      from others.languages import LanguageManager
+    
+      lang_manager = LanguageManager()
+      current_lang = lang_manager.get_language()
+    
+      if language_code != current_lang:
+          lang_manager.save_language(language_code)
+        
+          # Zapisz bieżący tekst
+          current_text = self.gui.text_edit.toPlainText()
+          current_file = self.current_file
+        
+          # Odśwież całe GUI
+          self.gui.update_language()
+        
+          # Przywróć tekst
+          self.gui.text_edit.setPlainText(current_text)
+          self.current_file = current_file
+          self.gui.current_file = current_file
+          self.gui.update_label()
+        
+          # Ponownie podłącz sygnały
+          self.connect_signals()
+        
+          self.gui.update_status(f"Język zmieniony na {lang_manager.get_language_name()}")
+
+    
     
     # ------------------------- Operacje na plikach -------------------------
     
