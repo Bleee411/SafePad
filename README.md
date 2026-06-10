@@ -31,24 +31,23 @@
 * **Framework GUI:** PyQt6
 * **Kryptografia:** `cryptography` (dla AES-GCM), `argon2-cffi`
 * **Obsługa Obrazów:** `Pillow` 
-* **System Aktualizacji:** `PyUpdater`
 * **Kompilacja:** `PyInstaller`
 
 ## 🌍 Platformy
 - 🪟 Windows — pełne wsparcie  
-- 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13) 
-- Gałąź Wersji na Linuxa [Linux Tree](https://github.com/Bleee411/SafePad/tree/Linux)
+- 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13)  
+
 
 
 
 ## Instalacja i Uruchomienie 
 
 ### Uruchamianie (Windows)
-1.Pobierz SafePad-2.0.1_Windows.exe z:
+1.Pobierz SafePad-2.1.0_Windows.exe z:
 
-[Wersja Stabilna V2.0.1](https://github.com/Bleee411/SafePad/releases/tag/Stable)
+[Wersja Stabilna V2.1.0](https://github.com/Bleee411/SafePad/releases/tag/Stable)
 
-2.Otwórz SafePad-2.0.1_Windows.exe i gotowe
+2.Otwórz SafePad-2.1.0_Windows.exe i gotowe
 
 ### Uruchamianie z kodu żródłowego
 
@@ -62,6 +61,9 @@
     ```bash
     pip install -r requirements.txt
     ```
+    ```bash
+    sudo apt install libnotify-bin
+    ```
 
 3.  Uruchom aplikację:
     ```bash
@@ -70,7 +72,7 @@
 
 ### Uruchamianie skompilowanej wersji (Linux)
 
-Po pobraniu skompilowanej wersji z https://github.com/Bleee411/SafePad/tree/Linux:
+Po pobraniu skompilowanej wersji z sekcji "Releases":
 
 1.  Nadaj plikowi uprawnienia do uruchomienia i pobierz libnotify-bin:
     ```bash
