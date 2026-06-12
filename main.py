@@ -200,7 +200,12 @@ class FolderDecryptWorker(QThread):
                     raise ValueError(f"Nieobsługiwana wersja: {version}")
             
         except Exception as e:
-            self.error.emit(str(e))
+            error_msg = str(e)
+            # Sprawdź czy to błąd hasła
+            if any(keyword in error_msg.lower() for keyword in ['hasło', 'password', 'key', 'mac', 'tag', 'auth', 'cipher']):
+                self.error.emit("Nieprawidłowe hasło! Sprawdź hasło i spróbuj ponownie.")
+            else:
+                self.error.emit(f"Błąd deszyfrowania: {error_msg}")
     
     def _decrypt_aes(self, f_in):
         """Standardowe odszyfrowywanie AES-GCM"""
@@ -211,7 +216,10 @@ class FolderDecryptWorker(QThread):
         self.progress.emit(10)
         self.status.emit("Deszyfrowanie danych...")
         
-        key = self.crypto.generate_key(self.password, salt)
+        try:
+            key = self.crypto.generate_key(self.password, salt)
+        except Exception as e:
+            raise ValueError(f"Błąd generowania klucza: {e}")
         
         temp_dir = tempfile.mkdtemp()
         temp_zip = os.path.join(temp_dir, "temp_folder.zip")
@@ -224,7 +232,11 @@ class FolderDecryptWorker(QThread):
                 encrypted_chunk = f_in.read(chunk_len)
                 
                 nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
-                decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
+                try:
+                    decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
+                except Exception as e:
+                    raise ValueError(f"Błąd autoryzacji AES-GCM - prawdopodobnie nieprawidłowe hasło: {e}")
+                
                 f_out.write(decrypted_chunk)
                 
                 if num_chunks > 0:
@@ -233,56 +245,58 @@ class FolderDecryptWorker(QThread):
         self._extract_zip(temp_zip)
     
     def _decrypt_cascade(self, f_in):
-      """Odszyfrowywanie kaskadowe"""
-      aes_salt = f_in.read(16)
-      aes_nonce_base = f_in.read(12)
-      serpent_salt = f_in.read(16)
-      num_chunks = int.from_bytes(f_in.read(8), 'big')
-    
-      self.progress.emit(10)
-      self.status.emit("Deszyfrowanie kaskadowe...")
-    
-      aes_key = self.crypto.generate_key(self.password, aes_salt)
-      serpent_key = self.crypto.generate_serpent_key(self.password, serpent_salt)
-    
-      temp_dir = tempfile.mkdtemp()
-      temp_zip = os.path.join(temp_dir, "temp_folder.zip")
-    
-      from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-      aesgcm = AESGCM(aes_key)
-    
-      with open(temp_zip, 'wb') as f_out:
-        for chunk_idx in range(num_chunks):
-            chunk_len = int.from_bytes(f_in.read(4), 'big')
-            serpent_encrypted = f_in.read(chunk_len)
-            
-            # Krok 1: Odszyfruj Serpent
-            try:
-                decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
+        """Odszyfrowywanie kaskadowe"""
+        aes_salt = f_in.read(16)
+        aes_nonce_base = f_in.read(12)
+        serpent_salt = f_in.read(16)
+        num_chunks = int.from_bytes(f_in.read(8), 'big')
+        
+        self.progress.emit(10)
+        self.status.emit("Deszyfrowanie kaskadowe...")
+        
+        try:
+            aes_key = self.crypto.generate_key(self.password, aes_salt)
+            serpent_key = self.crypto.generate_serpent_key(self.password, serpent_salt)
+        except Exception as e:
+            raise ValueError(f"Błąd generowania kluczy: {e}")
+        
+        temp_dir = tempfile.mkdtemp()
+        temp_zip = os.path.join(temp_dir, "temp_folder.zip")
+        
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        aesgcm = AESGCM(aes_key)
+        
+        with open(temp_zip, 'wb') as f_out:
+            for chunk_idx in range(num_chunks):
+                chunk_len = int.from_bytes(f_in.read(4), 'big')
+                serpent_encrypted = f_in.read(chunk_len)
                 
-                # Wyciągnij IV i dane
-                # IV jest na pierwszych 16 bajtach
-                chunk_iv = decrypted_combined[:16]
-                padded_aes = decrypted_combined[16:]
+                # Krok 1: Odszyfruj Serpent
+                try:
+                    decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
+                    
+                    # Wyciągnij IV i dane
+                    chunk_iv = decrypted_combined[:16]
+                    padded_aes = decrypted_combined[16:]
+                    
+                    # Usuń padding
+                    aes_encrypted = self.crypto._unpad_pkcs7(padded_aes)
+                    
+                except Exception as e:
+                    raise ValueError(f"Błąd deszyfrowania Serpent - prawdopodobnie nieprawidłowe hasło: {e}")
                 
-                # Usuń padding
-                aes_encrypted = self.crypto._unpad_pkcs7(padded_aes)
+                # Krok 2: Odszyfruj AES
+                aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, 'big')
+                try:
+                    decrypted_chunk = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
+                    f_out.write(decrypted_chunk)
+                except Exception as e:
+                    raise ValueError(f"Błąd deszyfrowania AES - prawdopodobnie nieprawidłowe hasło: {e}")
                 
-            except Exception as e:
-                raise ValueError(f"Błąd deszyfrowania Serpent: {e}")
-            
-            # Krok 2: Odszyfruj AES
-            aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, 'big')
-            try:
-                decrypted_chunk = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
-                f_out.write(decrypted_chunk)
-            except Exception as e:
-                raise ValueError(f"Błąd deszyfrowania AES: {e}")
-            
-            if num_chunks > 0:
-                self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-    
-      self._extract_zip(temp_zip)
+                if num_chunks > 0:
+                    self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
+        
+        self._extract_zip(temp_zip)
     
     def _extract_zip(self, temp_zip):
         """Wypakowuje pliki ZIP i czyści"""
@@ -656,9 +670,20 @@ class SafePadApp:
         QMessageBox.information(self.gui, "Sukces", f"Folder odszyfrowany pomyślnie!\n\n{message}")
     
     def _on_crypto_error(self, error_msg):
-        self.progress.close()
-        self.gui.update_status("Błąd", is_error=True)
-        QMessageBox.critical(self.gui, "Błąd", error_msg)
+      self.progress.close()
+      self.gui.update_status("Błąd", is_error=True)
+    
+      # Wyświetl bardziej przyjazny komunikat dla błędów hasła
+      if "nieprawidłowe hasło" in error_msg.lower() or "invalid password" in error_msg.lower():
+          QMessageBox.critical(
+              self.gui, 
+              "Błąd hasła", 
+              "Nieprawidłowe hasło!\n\n"
+              "Sprawdź czy wprowadzone hasło jest poprawne.\n"
+              "Hasła rozróżniają wielkość liter."
+          )
+      else:
+          QMessageBox.critical(self.gui, "Błąd", error_msg)
     
     # ------------------------- Sesja -------------------------
     
