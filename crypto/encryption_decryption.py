@@ -3,6 +3,7 @@ import json
 import hashlib
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
 from cryptography.hazmat.primitives import hashes
 import argon2
 import winreg
@@ -224,14 +225,23 @@ class Registryconf:
 class EncryptionCEO:
     
     ENCRYPTION_VERSION = "V2.0"
+    CASCADE_VERSION = "V3.0"
     SALT_SIZE = 16
-    NONCE_SIZE = 12 #96 bitów dla GCM
+    NONCE_SIZE = 12
+    SERPENT_KEY_SIZE = 32
+    SERPENT_BLOCK_SIZE = 16
     
     def __init__(self, encryption_level=None):
-        self.encryption_level = encryption_level or Registryconf.get_current_level()
+        if encryption_level is None:
+            settings = Registryconf.load_settings()
+            encryption_level = settings.get("encryption_level", "medium")
+        
+        self.encryption_level = encryption_level
         self.argon_params = Registryconf.load_argon_conf(self.encryption_level)
+        self.use_cascade = (self.encryption_level == "high")
         
     def generate_key(self, password, salt):
+        """Generuje klucz AES (256 bit)"""
         try:
             key = argon2.low_level.hash_secret_raw(
                 secret=password.encode('utf-8'),
@@ -239,17 +249,74 @@ class EncryptionCEO:
                 time_cost=self.argon_params['t'],
                 memory_cost=self.argon_params['m'],
                 parallelism=self.argon_params['p'],
-                hash_len=32, #256 bitów dla aes gcm
+                hash_len=32,
                 type=argon2.low_level.Type.ID
             )
             return key
         except Exception as e:
-            print(f"Błąd generowania klucza: {e}")
+            print(f"Błąd generowania klucza AES: {e}")
             raise
+    
+    def generate_serpent_key(self, password, salt):
+        """Generuje osobny klucz dla Serpent (256 bit)"""
+        try:
+            different_salt = bytes([b ^ 0xAA for b in salt])
+            key = argon2.low_level.hash_secret_raw(
+                secret=password.encode('utf-8'),
+                salt=different_salt,
+                time_cost=self.argon_params['t'],
+                memory_cost=self.argon_params['m'],
+                parallelism=self.argon_params['p'],
+                hash_len=32,
+                type=argon2.low_level.Type.ID
+            )
+            return key
+        except Exception as e:
+            print(f"Błąd generowania klucza Serpent: {e}")
+            raise
+    
+    @staticmethod
+    def _pad_pkcs7(data, block_size=16):
+        """Dodaje padding PKCS7"""
+        padding_length = block_size - (len(data) % block_size)
+        padding = bytes([padding_length] * padding_length)
+        return data + padding
+    
+    @staticmethod
+    def _unpad_pkcs7(padded_data):
+        """Usuwa padding PKCS7"""
+        padding_length = padded_data[-1]
+        if padding_length < 1 or padding_length > 16:
+            raise ValueError("Nieprawidłowy padding")
+        return padded_data[:-padding_length]
+    
+    def _serpent_encrypt_with_iv(self, key, iv, data):
+        """Szyfrowanie Serpent-CBC"""
         
-        
+        try:
+            return serpent_cbc_encrypt(key, iv, data)
+        except TypeError:
+            combined = iv + data
+            encrypted = serpent_cbc_encrypt(key, combined)
+            return encrypted
+    
+    def _serpent_decrypt_with_iv(self, key, iv, data):
+        """Deszyfrowanie Serpent-CBC z IV """
+        try:
+            return serpent_cbc_decrypt(key, iv, data)
+        except TypeError:
+            decrypted = serpent_cbc_decrypt(key, data)
+            return decrypted[16:]
+    
     def encrypt_data(self, password, data):
-        
+        """Szyfruje dane AES-GCM lub AES-GCM + Serpent-CBC"""
+        if self.use_cascade:
+            return self._encrypt_cascade(password, data)
+        else:
+            return self._encrypt_aes_only(password, data)
+    
+    def _encrypt_aes_only(self, password, data):
+        """Szyfrowanie tylko AES-GCM"""
         salt = os.urandom(self.SALT_SIZE)
         nonce = os.urandom(self.NONCE_SIZE)
         
@@ -267,33 +334,120 @@ class EncryptionCEO:
         
         return result
     
+    def _encrypt_cascade(self, password, data):
+        """Szyfrowanie kaskadowe: najpierw AES-GCM, potem Serpent-CBC"""
+        # Krok 1: Szyfrowanie AES-GCM
+        aes_salt = os.urandom(self.SALT_SIZE)
+        aes_nonce = os.urandom(self.NONCE_SIZE)
+        aes_key = self.generate_key(password, aes_salt)
+        
+        aesgcm = AESGCM(aes_key)
+        aes_encrypted = aesgcm.encrypt(aes_nonce, data, None)
+        
+        # Krok 2: Szyfrowanie Serpent-CBC
+        serpent_salt = os.urandom(self.SALT_SIZE)
+        serpent_iv = os.urandom(self.SERPENT_BLOCK_SIZE)
+        serpent_key = self.generate_serpent_key(password, serpent_salt)
+        
+        # Padding PKCS7
+        padded_data = self._pad_pkcs7(aes_encrypted, self.SERPENT_BLOCK_SIZE)
+        
+        # Szyfrowanie Serpent - IV jako część danych
+        # Format: IV(16 bajtów) + dane
+        combined_data = serpent_iv + padded_data
+        serpent_encrypted = serpent_cbc_encrypt(serpent_key, combined_data)
+        
+        # Format: V3.0 + AES_SALT(16) + AES_NONCE(12) + SERPENT_SALT(16) + DANE
+        # UWAGA: Nie zapisujemy osobno IV, bo jest w zaszyfrowanych danych
+        result = (
+            self.CASCADE_VERSION.encode('utf-8') +
+            aes_salt +
+            aes_nonce +
+            serpent_salt +
+            serpent_encrypted
+        )
+        
+        return result
+    
     def decrypt_data(self, password, encrypted_data):
+        """Odszyfrowuje dane"""
+        if len(encrypted_data) < 4:
+            raise ValueError("Dane są za krótkie")
+            
+        version = encrypted_data[:4].decode('utf-8')
         
-        #sprawdź minimalną długość 
-        
+        if version == self.CASCADE_VERSION:
+            return self._decrypt_cascade(password, encrypted_data)
+        elif version == self.ENCRYPTION_VERSION:
+            return self._decrypt_aes_only(password, encrypted_data)
+        else:
+            raise ValueError(f"Nieobsługiwana wersja szyfrowania: {version}")
+    
+    def _decrypt_aes_only(self, password, encrypted_data):
+        """Odszyfrowanie tylko AES-GCM"""
         header_size = 4 + self.SALT_SIZE + self.NONCE_SIZE
         if len(encrypted_data) < header_size:
             raise ValueError("Dane są za krótkie albo uszkodzone")
-        
-        #sprawdź wersję szyfrowania
-        
-        version = encrypted_data[:4].decode('utf-8')
-        if version != self.ENCRYPTION_VERSION:
-            raise ValueError(f"Nieobsługiwana wersja szyfrowania: {version}")
-        
-        #odczytaj salt i nonce
         
         salt = encrypted_data[4:4 + self.SALT_SIZE]
         nonce = encrypted_data[4 + self.SALT_SIZE:header_size]
         ciphertext = encrypted_data[header_size:]
         
-        #generuj klucz
         key = self.generate_key(password, salt)
-        
-        #odszyfruj
-        
         aesgcm = AESGCM(key)
         decrypted_data = aesgcm.decrypt(nonce, ciphertext, None)
+        
+        return decrypted_data
+    
+    def _decrypt_cascade(self, password, encrypted_data):
+        """
+        Odszyfrowanie kaskadowe: najpierw Serpent-CBC, potem AES-GCM
+        Format: V3.0 + AES_SALT(16) + AES_NONCE(12) + SERPENT_SALT(16) + ZASZYFROWANE_DANE
+        Zaszyfrowane dane zawierają: IV(16) + AES_ENCRYPTED
+        """
+        min_length = 4 + self.SALT_SIZE + self.NONCE_SIZE + self.SALT_SIZE + 16
+        if len(encrypted_data) < min_length:
+            raise ValueError("Dane są za krótkie dla formatu kaskadowego")
+        
+        # Parsuj nagłówek
+        pos = 4
+        
+        aes_salt = encrypted_data[pos:pos + self.SALT_SIZE]
+        pos += self.SALT_SIZE
+        
+        aes_nonce = encrypted_data[pos:pos + self.NONCE_SIZE]
+        pos += self.NONCE_SIZE
+        
+        serpent_salt = encrypted_data[pos:pos + self.SALT_SIZE]
+        pos += self.SALT_SIZE
+        
+        # Reszta to zaszyfrowane dane Serpent (zawierające IV + dane AES)
+        serpent_encrypted = encrypted_data[pos:]
+        
+        # Krok 1: Odszyfrowanie Serpent-CBC
+        serpent_key = self.generate_serpent_key(password, serpent_salt)
+        try:
+            # Deszyfruj Serpent (zwraca IV + padded AES data)
+            decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
+            
+            # Wyciągnij IV i dane
+            serpent_iv = decrypted_combined[:self.SERPENT_BLOCK_SIZE]
+            padded_aes = decrypted_combined[self.SERPENT_BLOCK_SIZE:]
+            
+            # Usuń padding PKCS7
+            aes_encrypted = self._unpad_pkcs7(padded_aes)
+            
+        except Exception as e:
+            raise ValueError(f"Nieprawidłowe hasło lub uszkodzone dane (błąd Serpent): {e}")
+        
+        # Krok 2: Odszyfrowanie AES-GCM
+        aes_key = self.generate_key(password, aes_salt)
+        aesgcm = AESGCM(aes_key)
+        
+        try:
+            decrypted_data = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
+        except Exception as e:
+            raise ValueError(f"Nieprawidłowe hasło lub uszkodzone dane (błąd AES-GCM): {e}")
         
         return decrypted_data
     
@@ -310,9 +464,7 @@ class EncryptionCEO:
             if progress_callback:
                 progress_callback(100)
                 
-            #zapisz 
-            
-            with open (output_path, 'wb') as f:
+            with open(output_path, 'wb') as f:
                 f.write(encrypted)
                 
             return True
@@ -321,9 +473,7 @@ class EncryptionCEO:
         
     def decrypt_file(self, password, input_path, output_path, progress_callback=None):
         try:
-            #odczytaj plik
-            
-            with open (input_path, 'rb') as f:
+            with open(input_path, 'rb') as f:
                 encrypted_data = f.read()
                 
             if progress_callback:
@@ -334,64 +484,97 @@ class EncryptionCEO:
             if progress_callback:
                 progress_callback(100)
                 
-            #zapisz
-            
-            with open (output_path, 'wb') as f:
+            with open(output_path, 'wb') as f:
                 f.write(decrypted)
                 
             return True
         except Exception as e:
             raise Exception(f"Błąd odszyfrowywania pliku: {e}")
         
-        
     def encrypt_data_chunked(self, password, input_path, output_path, chunk_size=50*1024*1024, progress_callback=None):
+        """Szyfrowanie pliku chunkami z obsługą trybu kaskadowego i standardowego"""
         try:
             file_size = os.path.getsize(input_path)
             num_chunks = (file_size + chunk_size - 1) // chunk_size
             
-            #generuj sól i nonce
-            
-            salt = os.urandom(self.SALT_SIZE)
-            nonce_base = os.urandom(self.NONCE_SIZE)
-            key = self.generate_key(password, salt)
-            
-            with open(input_path, 'rb') as f_in:
-                with open(output_path, 'wb') as f_out:
-                    #zapisz nagłówek
-                    f_out.write(self.ENCRYPTION_VERSION.encode('utf-8'))
-                    f_out.write(salt)
-                    f_out.write(nonce_base)
-                    f_out.write(num_chunks.to_bytes(8, byteorder='big'))
-                    
-                    procced = 0
-                    aesgcm = AESGCM(key)
-                    
-                    for chunk_idx in range(num_chunks):
-                        chunk = f_in.read(chunk_size)
-                        if not chunk:
-                            break
+            if self.use_cascade:
+                # Przygotowanie dla szyfrowania kaskadowego
+                aes_salt = os.urandom(self.SALT_SIZE)
+                aes_nonce_base = os.urandom(self.NONCE_SIZE)
+                aes_key = self.generate_key(password, aes_salt)
+                
+                serpent_salt = os.urandom(self.SALT_SIZE)
+                serpent_key = self.generate_serpent_key(password, serpent_salt)
+                
+                with open(input_path, 'rb') as f_in:
+                    with open(output_path, 'wb') as f_out:
+                        # Nagłówek kaskadowy (bez IV - będzie w każdym chunku)
+                        f_out.write(self.CASCADE_VERSION.encode('utf-8'))
+                        f_out.write(aes_salt)
+                        f_out.write(aes_nonce_base)
+                        f_out.write(serpent_salt)
+                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
                         
-                        #unikalny nonce dla każdego chunka
+                        processed = 0
+                        aesgcm = AESGCM(aes_key)
                         
-                        nonce = nonce_base + chunk_idx.to_bytes(4, byteorder='big')
-                        
-                        #szyfruj chunk
-                        
-                        encrypted_chunk = aesgcm.encrypt(nonce, chunk, None)
-                        
-                        #zapisz długość i dane
-                        f_out.write(len(encrypted_chunk).to_bytes(4, byteorder='big'))
-                        f_out.write(encrypted_chunk)
-                        
-                        procced += len(chunk)
-                        if progress_callback and file_size > 0:
-                            progress_callback(int(procced / file_size * 100))
+                        for chunk_idx in range(num_chunks):
+                            chunk = f_in.read(chunk_size)
+                            if not chunk:
+                                break
                             
+                            # Krok 1: AES-GCM
+                            aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, byteorder='big')
+                            aes_encrypted = aesgcm.encrypt(aes_nonce, chunk, None)
+                            
+                            # Krok 2: Serpent-CBC - każdy chunk ma własny IV
+                            chunk_iv = os.urandom(self.SERPENT_BLOCK_SIZE)
+                            
+                            # Padding i przygotowanie danych (IV + dane)
+                            padded_data = self._pad_pkcs7(aes_encrypted, self.SERPENT_BLOCK_SIZE)
+                            combined_data = chunk_iv + padded_data
+                            
+                            # Szyfrowanie Serpent
+                            serpent_encrypted = serpent_cbc_encrypt(serpent_key, combined_data)
+                            
+                            # Zapisz chunk
+                            f_out.write(len(serpent_encrypted).to_bytes(4, byteorder='big'))
+                            f_out.write(serpent_encrypted)
+                            
+                            processed += len(chunk)
+                            if progress_callback and file_size > 0:
+                                progress_callback(int(processed / file_size * 100))
+            else:
+                # Standardowe szyfrowanie AES-GCM
+                salt = os.urandom(self.SALT_SIZE)
+                nonce_base = os.urandom(self.NONCE_SIZE)
+                key = self.generate_key(password, salt)
+                
+                with open(input_path, 'rb') as f_in:
+                    with open(output_path, 'wb') as f_out:
+                        f_out.write(self.ENCRYPTION_VERSION.encode('utf-8'))
+                        f_out.write(salt)
+                        f_out.write(nonce_base)
+                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
+                        
+                        processed = 0
+                        aesgcm = AESGCM(key)
+                        
+                        for chunk_idx in range(num_chunks):
+                            chunk = f_in.read(chunk_size)
+                            if not chunk:
+                                break
+                            
+                            nonce = nonce_base + chunk_idx.to_bytes(4, byteorder='big')
+                            encrypted_chunk = aesgcm.encrypt(nonce, chunk, None)
+                            
+                            f_out.write(len(encrypted_chunk).to_bytes(4, byteorder='big'))
+                            f_out.write(encrypted_chunk)
+                            
+                            processed += len(chunk)
+                            if progress_callback and file_size > 0:
+                                progress_callback(int(processed / file_size * 100))
+            
             return True
         except Exception as e:
             raise Exception(f"Błąd szyfrowania pliku: {e}")
-                    
-            
-
-            
-
