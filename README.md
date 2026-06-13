@@ -43,11 +43,11 @@
 ## Instalacja i Uruchomienie 
 
 ### Uruchamianie (Windows)
-1.Pobierz SafePad-2.1.0_Windows.exe z:
+1.Pobierz SafePad-2.2.0_Windows.exe z:
 
-[Wersja Stabilna V2.1.0](https://github.com/Bleee411/SafePad/releases/tag/Stable)
+[Wersja Stabilna V2.2.0](https://github.com/Bleee411/SafePad/releases/tag/Stable)
 
-2.Otwórz SafePad-2.1.0_Windows.exe i gotowe
+2.Otwórz SafePad-2.2.0_Windows.exe i gotowe
 
 ### Uruchamianie z kodu żródłowego
 
