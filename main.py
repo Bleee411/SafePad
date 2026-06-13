@@ -762,16 +762,33 @@ class SafePadApp:
     def show_about(self):
         about_text = f"""SafePad {APP_VERSION}
 
-Bezpieczny edytor tekstu z szyfrowaniem AES-GCM i Argon2ID.
-
+🛡️ Bezpieczny Edytor Tekstu
 Autor: {AUTHOR}
 
-Funkcje:
-- Szyfrowanie plików
-- Szyfrowanie folderów
-- Argon2ID z AES-GCM 256
-- Automatyczny backup sesji
-- Licencja: MIT
+Licencja: MIT (Open-Source)
+
+Ten projekt to nowoczesny, wydajny i zorientowany na prywatność edytor tekstu napisany w języku Python. Został zaprojektowany z myślą o maksymalnej ochronie poufności danych. Dzięki implementacji najnowocześniejszych standardów kryptograficznych, aplikacja gwarantuje, że Twoje notatki, kody źródłowe czy prywatne dokumenty pozostaną w 100% bezpieczne – nawet w przypadku fizycznego przejęcia nośnika danych czy ataku na urządzenie.
+
+✨ Główne funkcje i możliwości
+Wszechstronne szyfrowanie danych (Pliki i Foldery)
+Aplikacja pozwala nie tylko na zabezpieczanie pojedynczych plików tekstowych, ale umożliwia również szyfrowanie całych katalogów. Ułatwia to zarządzanie większymi zasobami i masowe zabezpieczanie dokumentów bez konieczności szyfrowania każdego pliku z osobna.
+
+Wysokiej klasy bezpieczeństwo kryptograficzne
+
+Kluczowanie (KDF): Do wyprowadzania klucza kryptograficznego z hasła użytkownika wykorzystywany jest algorytm Argon2ID (zwycięzca Password Hashing Competition). Zapewnia on potężną ochronę przed atakami słownikowymi, atakami typu brute-force oraz łamaniem haseł przy użyciu układów GPU.
+
+Szyfrowanie i autentykacja: Użytkownik ma do wyboru dwa zaawansowane algorytmy szyfrujące operujące w trybie uwierzytelnionym (AEAD):
+
+AES-GCM 256-bit: Aktualny, niezwykle szybki standard branżowy.
+
+Serpent 256 GCM: Alternatywny algorytm o bardzo konserwatywnej budowie, znany z ogromnego marginesu bezpieczeństwa.
+Dzięki wykorzystaniu trybu GCM (Galois/Counter Mode), edytor zapewnia nie tylko poufność, ale też chroni integralność danych – program natychmiast wykryje każdą próbę modyfikacji lub uszkodzenia zaszyfrowanego pliku z zewnątrz.
+
+Automatyczny backup sesji (Auto-Save)
+System dba o to, abyś nigdy nie stracił niezapisanej pracy. W tle automatycznie tworzone są zaszyfrowane kopie zapasowe (snapshoty) aktualnej sesji. W przypadku awarii zasilania, nieoczekiwanego zamknięcia programu lub błędu systemu operacyjnego, Twoje dane mogą zostać szybko i bezpiecznie odzyskane tuż po ponownym uruchomieniu edytora.
+
+Pełna transparentność (Licencja MIT)
+Kod programu jest otwarty. Możesz swobodnie z niego korzystać, audytować pod kątem bezpieczeństwa, modyfikować i dostosowywać do własnych, specyficznych potrzeb – zarówno w projektach prywatnych, jak i komercyjnych.
 """
         
         QMessageBox.about(self.gui, "O programie", about_text)
