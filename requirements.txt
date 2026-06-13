@@ -1,7 +1,8 @@
-PyQt6>=6.5
+PyQt6>=6.11.0
 Pillow>=10.0.0
-cryptography>=41.0.0
-argon2-cffi>=23.1.0
-pyupdater>=4.0
+cryptography>=48.0.0
+argon2-cffi>=25.1.0
 pyinstaller>=6.5.0
 packaging>=23.0
+pyserpent>=1.2.0
+win10toast>=0.9
