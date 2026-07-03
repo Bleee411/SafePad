@@ -290,11 +290,11 @@ class SettingsDialog(QDialog):
         self.enc_level_group = QButtonGroup(self)
         levels = [
             (tr("security_level_low"), "low"),
-            (tr("security_level_medium"), "normal"), 
+            (tr("security_level_medium"), "medium"), 
             (tr("security_level_high"), "high")
         ]
         
-        current_level = self.settings.get("encryption_level", "normal")
+        current_level = self.settings.get("encryption_level", "medium")
         for text, level in levels:
             radio = QRadioButton(text)
             radio.setChecked(level == current_level)
@@ -418,7 +418,7 @@ class SettingsDialog(QDialog):
         # Load current parameters from registry
         try:
             from crypto.encryption_decryption import Registryconf
-            current_level = self.settings.get("encryption_level", "normal")
+            current_level = self.settings.get("encryption_level", "medium")
             current_params = Registryconf.load_argon_conf(current_level)
             
             self.current_mem_label = QLabel(f"{current_params.get('m', 65536) // 1024} MB")
@@ -1005,7 +1005,7 @@ class SettingsDialog(QDialog):
         
         Argon2Benchmark.save_benchmark_results(Registryconf, results)
         
-        current_level = self.settings.get("encryption_level", "normal")
+        current_level = self.settings.get("encryption_level", "medium")
         current_params = Registryconf.load_argon_conf(current_level)
         
         self.current_mem_label.setText(f"{current_params.get('m', 65536) // 1024} MB")
@@ -1066,7 +1066,7 @@ class SettingsDialog(QDialog):
     
     def get_settings(self):
         """Get updated settings from dialog"""
-        encryption_level = "normal"
+        encryption_level = "medium"
         if hasattr(self, 'enc_level_low_radio') and self.enc_level_low_radio.isChecked():
             encryption_level = "low"
         elif hasattr(self, 'enc_level_high_radio') and self.enc_level_high_radio.isChecked():

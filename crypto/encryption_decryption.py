@@ -8,6 +8,69 @@ from cryptography.hazmat.primitives import hashes
 import argon2
 import winreg
 import base64
+import ctypes
+from ctypes import wintypes
+
+
+# ------------------------------- Ochrona sekretów przez Windows DPAPI -------------------------------
+# Base64 nie jest szyfrowaniem - jest trywialnie odwracalny przez każdego, kto ma
+# dostęp do rejestru. Zamiast tego korzystamy z Windows DPAPI (CryptProtectData /
+# CryptUnprotectData), które szyfruje dane kluczem powiązanym z kontem
+# zalogowanego użytkownika Windows - inny użytkownik/proces nie odczyta sekretu
+# nawet mając pełny odczyt rejestru bieżącego użytkownika.
+
+class _DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+
+def _to_blob(data: bytes) -> _DATA_BLOB:
+    buf = ctypes.create_string_buffer(data, len(data))
+    return _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+
+
+def dpapi_protect(data: bytes) -> bytes:
+    """Szyfruje dane za pomocą Windows DPAPI (powiązane z bieżącym użytkownikiem)."""
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+
+    in_blob = _to_blob(data)
+    out_blob = _DATA_BLOB()
+
+    ok = crypt32.CryptProtectData(
+        ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)
+    )
+    if not ok:
+        raise OSError("CryptProtectData nie powiodło się")
+
+    try:
+        result = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+    return result
+
+
+def dpapi_unprotect(data: bytes) -> bytes:
+    """Odszyfrowuje dane zapisane przez dpapi_protect()."""
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+
+    in_blob = _to_blob(data)
+    out_blob = _DATA_BLOB()
+
+    ok = crypt32.CryptUnprotectData(
+        ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out_blob)
+    )
+    if not ok:
+        raise OSError("CryptUnprotectData nie powiodło się (inny użytkownik/komputer?)")
+
+    try:
+        result = ctypes.string_at(out_blob.pbData, out_blob.cbData)
+    finally:
+        kernel32.LocalFree(out_blob.pbData)
+
+    return result
+
 
 # ------------------------------- Konfiguracja Parametrów Argona -------------------------------
 
@@ -178,8 +241,10 @@ class Registryconf:
     def save_backup_password(password):
         try:
             key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH)
-            # Szyfruj hasło przed zapisaniem (proste zabezpieczenie)
-            encoded_password = base64.b64encode(password.encode()).decode()
+            # Chronimy hasło przez Windows DPAPI (powiązane z kontem użytkownika),
+            # a nie samym base64, który jest trywialnie odwracalny.
+            protected = dpapi_protect(password.encode('utf-8'))
+            encoded_password = base64.b64encode(protected).decode()
             winreg.SetValueEx(key, "BackupPassword", 0, winreg.REG_SZ, encoded_password)
             winreg.CloseKey(key)
             return True
@@ -193,7 +258,8 @@ class Registryconf:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH, 0, winreg.KEY_READ)
             try:
                 encoded_password, _ = winreg.QueryValueEx(key, "BackupPassword")
-                password = base64.b64decode(encoded_password).decode()
+                protected = base64.b64decode(encoded_password)
+                password = dpapi_unprotect(protected).decode('utf-8')
                 winreg.CloseKey(key)
                 return password
             except FileNotFoundError:
@@ -289,24 +355,6 @@ class EncryptionCEO:
         if padding_length < 1 or padding_length > 16:
             raise ValueError("Nieprawidłowy padding")
         return padded_data[:-padding_length]
-    
-    def _serpent_encrypt_with_iv(self, key, iv, data):
-        """Szyfrowanie Serpent-CBC"""
-        
-        try:
-            return serpent_cbc_encrypt(key, iv, data)
-        except TypeError:
-            combined = iv + data
-            encrypted = serpent_cbc_encrypt(key, combined)
-            return encrypted
-    
-    def _serpent_decrypt_with_iv(self, key, iv, data):
-        """Deszyfrowanie Serpent-CBC z IV """
-        try:
-            return serpent_cbc_decrypt(key, iv, data)
-        except TypeError:
-            decrypted = serpent_cbc_decrypt(key, data)
-            return decrypted[16:]
     
     def encrypt_data(self, password, data):
         """Szyfruje dane AES-GCM lub AES-GCM + Serpent-CBC"""
@@ -451,130 +499,4 @@ class EncryptionCEO:
         
         return decrypted_data
     
-    def encrypt_file(self, password, input_path, output_path, progress_callback=None):
-        try:
-            with open(input_path, 'rb') as f:
-                data = f.read()
-                
-            if progress_callback:
-                progress_callback(50)
-                
-            encrypted = self.encrypt_data(password, data)
-            
-            if progress_callback:
-                progress_callback(100)
-                
-            with open(output_path, 'wb') as f:
-                f.write(encrypted)
-                
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd szyfrowania pliku: {e}")
-        
-    def decrypt_file(self, password, input_path, output_path, progress_callback=None):
-        try:
-            with open(input_path, 'rb') as f:
-                encrypted_data = f.read()
-                
-            if progress_callback:
-                progress_callback(50)
-                
-            decrypted = self.decrypt_data(password, encrypted_data)
-            
-            if progress_callback:
-                progress_callback(100)
-                
-            with open(output_path, 'wb') as f:
-                f.write(decrypted)
-                
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd odszyfrowywania pliku: {e}")
-        
-    def encrypt_data_chunked(self, password, input_path, output_path, chunk_size=50*1024*1024, progress_callback=None):
-        """Szyfrowanie pliku chunkami z obsługą trybu kaskadowego i standardowego"""
-        try:
-            file_size = os.path.getsize(input_path)
-            num_chunks = (file_size + chunk_size - 1) // chunk_size
-            
-            if self.use_cascade:
-                # Przygotowanie dla szyfrowania kaskadowego
-                aes_salt = os.urandom(self.SALT_SIZE)
-                aes_nonce_base = os.urandom(self.NONCE_SIZE)
-                aes_key = self.generate_key(password, aes_salt)
-                
-                serpent_salt = os.urandom(self.SALT_SIZE)
-                serpent_key = self.generate_serpent_key(password, serpent_salt)
-                
-                with open(input_path, 'rb') as f_in:
-                    with open(output_path, 'wb') as f_out:
-                        # Nagłówek kaskadowy (bez IV - będzie w każdym chunku)
-                        f_out.write(self.CASCADE_VERSION.encode('utf-8'))
-                        f_out.write(aes_salt)
-                        f_out.write(aes_nonce_base)
-                        f_out.write(serpent_salt)
-                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
-                        
-                        processed = 0
-                        aesgcm = AESGCM(aes_key)
-                        
-                        for chunk_idx in range(num_chunks):
-                            chunk = f_in.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            # Krok 1: AES-GCM
-                            aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, byteorder='big')
-                            aes_encrypted = aesgcm.encrypt(aes_nonce, chunk, None)
-                            
-                            # Krok 2: Serpent-CBC - każdy chunk ma własny IV
-                            chunk_iv = os.urandom(self.SERPENT_BLOCK_SIZE)
-                            
-                            # Padding i przygotowanie danych (IV + dane)
-                            padded_data = self._pad_pkcs7(aes_encrypted, self.SERPENT_BLOCK_SIZE)
-                            combined_data = chunk_iv + padded_data
-                            
-                            # Szyfrowanie Serpent
-                            serpent_encrypted = serpent_cbc_encrypt(serpent_key, combined_data)
-                            
-                            # Zapisz chunk
-                            f_out.write(len(serpent_encrypted).to_bytes(4, byteorder='big'))
-                            f_out.write(serpent_encrypted)
-                            
-                            processed += len(chunk)
-                            if progress_callback and file_size > 0:
-                                progress_callback(int(processed / file_size * 100))
-            else:
-                # Standardowe szyfrowanie AES-GCM
-                salt = os.urandom(self.SALT_SIZE)
-                nonce_base = os.urandom(self.NONCE_SIZE)
-                key = self.generate_key(password, salt)
-                
-                with open(input_path, 'rb') as f_in:
-                    with open(output_path, 'wb') as f_out:
-                        f_out.write(self.ENCRYPTION_VERSION.encode('utf-8'))
-                        f_out.write(salt)
-                        f_out.write(nonce_base)
-                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
-                        
-                        processed = 0
-                        aesgcm = AESGCM(key)
-                        
-                        for chunk_idx in range(num_chunks):
-                            chunk = f_in.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            nonce = nonce_base + chunk_idx.to_bytes(4, byteorder='big')
-                            encrypted_chunk = aesgcm.encrypt(nonce, chunk, None)
-                            
-                            f_out.write(len(encrypted_chunk).to_bytes(4, byteorder='big'))
-                            f_out.write(encrypted_chunk)
-                            
-                            processed += len(chunk)
-                            if progress_callback and file_size > 0:
-                                progress_callback(int(processed / file_size * 100))
-            
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd szyfrowania pliku: {e}")
+    # NOTE: tutaj istniał martwy kod run_argon2_benchmark, który został usunięty, ponieważ nie był wywoływany i nie był powiązany z żadną klasą. Logika benchmarku Argon2ID została przeniesiona do ui.py (SettingsDialog.run_benchmark / BenchmarkThread).
