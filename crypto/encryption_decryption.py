@@ -1,12 +1,18 @@
 import os
 import json
-import hashlib
+import base64
+import stat
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-from cryptography.hazmat.primitives import hashes
 from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
 import argon2
 from pathlib import Path
+
+try:
+    import keyring
+    import keyring.errors
+    _HAS_KEYRING = True
+except ImportError:
+    _HAS_KEYRING = False
 
 # ------------------------------- Konfiguracja Parametrów Argona -------------------------------
 
@@ -16,6 +22,11 @@ class Registryconf:
     CONFIG_FILE = CONFIG_DIR / "settings.json"
     ARGON_CONFIG_FILE = CONFIG_DIR / "argon_config.json"
     
+    # Nazwa "service" pod jaką hasło do backupów jest przechowywane w
+    # systemowym keyringu (GNOME Keyring / KWallet / Secret Service).
+    KEYRING_SERVICE = "SafePad"
+    KEYRING_USERNAME = "backup_password"
+    
     DEFAULT_ARGON_PARAMS = {
         "low": {"m": 16 * 1024, "t": 2, "p": 1},
         "medium": {"m": 64 * 1024, "t": 3, "p": 2},
@@ -24,8 +35,14 @@ class Registryconf:
     
     @classmethod
     def _ensure_config_dir(cls):
-        """Tworzy katalog konfiguracyjny, jeśli nie istnieje."""
+        """Tworzy katalog konfiguracyjny (jeśli nie istnieje) z restrykcyjnymi
+        uprawnieniami 0700, żeby inni użytkownicy tego samego komputera nie
+        mogli odczytać plików konfiguracyjnych."""
         cls.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(cls.CONFIG_DIR, stat.S_IRWXU)  # 0700 - tylko właściciel
+        except OSError:
+            pass
     
     @classmethod
     def _read_config(cls, filepath):
@@ -34,19 +51,20 @@ class Registryconf:
             if filepath.exists():
                 with open(filepath, 'r', encoding='utf-8') as f:
                     return json.load(f)
-        except (json.JSONDecodeError, Exception) as e:
+        except (json.JSONDecodeError, OSError) as e:
             print(f"Błąd odczytu pliku konfiguracyjnego {filepath}: {e}")
         return {}
     
     @classmethod
     def _write_config(cls, filepath, data):
-        """Zapisuje dane do pliku JSON."""
+        """Zapisuje dane do pliku JSON z restrykcyjnymi uprawnieniami (0600)."""
         cls._ensure_config_dir()
         try:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=4)
+            os.chmod(filepath, stat.S_IRUSR | stat.S_IWUSR)  # 0600 - tylko właściciel
             return True
-        except Exception as e:
+        except OSError as e:
             print(f"Błąd zapisu pliku konfiguracyjnego {filepath}: {e}")
             return False
     
@@ -77,8 +95,18 @@ class Registryconf:
     
     @classmethod
     def save_settings(cls, settings):
-        """Zapisuje wszystkie ustawienia aplikacji w pliku JSON."""
-        return cls._write_config(cls.CONFIG_FILE, settings)
+        """Zapisuje ustawienia aplikacji, SCALAJĄC je z już zapisaną
+        konfiguracją.
+        
+        Wcześniej ta metoda całkowicie nadpisywała plik ustawień samym
+        przekazanym słownikiem `settings`. Ponieważ SettingsDialog.get_settings()
+        zwraca tylko ~10 kluczy widocznych w oknie Ustawień, każde zapisanie
+        ustawień (np. samo przełączenie dark mode) bezpowrotnie usuwało inne
+        dane trzymane w tym samym pliku, takie jak wyniki ostatniego
+        benchmarku Argon2ID (last_benchmark_time/last_benchmark_params)."""
+        existing = cls._read_config(cls.CONFIG_FILE)
+        existing.update(settings)
+        return cls._write_config(cls.CONFIG_FILE, existing)
     
     @classmethod
     def load_settings(cls):
@@ -98,35 +126,7 @@ class Registryconf:
         # Scal załadowane ustawienia z domyślnymi
         default_settings.update(loaded_settings)
         return default_settings
-        
-    @classmethod
-    def save_stationary_pin(cls, pin):
-        """Zapisuje PIN (hash) w pliku konfiguracyjnym."""
-        settings = cls._read_config(cls.CONFIG_FILE)
-        import hashlib
-        pin_hash = hashlib.sha256(pin.encode()).hexdigest()
-        settings["stationary_pin_hash"] = pin_hash
-        return cls._write_config(cls.CONFIG_FILE, settings)
     
-    @classmethod
-    def check_stationary_pin(cls, pin):
-        """Sprawdza czy PIN jest poprawny."""
-        settings = cls._read_config(cls.CONFIG_FILE)
-        stored_hash = settings.get("stationary_pin_hash")
-        if not stored_hash:
-            return False
-        
-        import hashlib
-        input_hash = hashlib.sha256(pin.encode()).hexdigest()
-        return input_hash == stored_hash
-    
-    @classmethod
-    def remove_stationary_pin(cls):
-        """Usuwa PIN z pliku konfiguracyjnego."""
-        settings = cls._read_config(cls.CONFIG_FILE)
-        if "stationary_pin_hash" in settings:
-            del settings["stationary_pin_hash"]
-        return cls._write_config(cls.CONFIG_FILE, settings)
 
     @classmethod
     def get_current_level(cls):
@@ -137,39 +137,72 @@ class Registryconf:
     
     @classmethod
     def save_backup_password(cls, password):
-        """Zapisuje własne hasło do backupów sesji."""
+        """Zapisuje własne hasło do backupów sesji.
+        
+        Przechowywane w systemowym keyringu (GNOME Keyring / KWallet / inny
+        backend Secret Service) zamiast w pliku tekstowym zakodowanym base64
+        - base64 nie jest szyfrowaniem i jest trywialnie odwracalny przez
+        każdego z odczytem do pliku konfiguracyjnego.
+        
+        Jeśli żaden keyring nie jest dostępny (np. serwer bez sesji
+        graficznej / bez usługi Secret Service), używamy zapasowego
+        przechowywania w pliku konfiguracyjnym (0600, właściciel-only) -
+        wciąż tylko base64, ale to jest już wyjątek, nie reguła."""
+        if _HAS_KEYRING:
+            try:
+                keyring.set_password(cls.KEYRING_SERVICE, cls.KEYRING_USERNAME, password)
+                # Upewnij się, że nie został pozostawiony żaden stary wpis fallback
+                settings = cls._read_config(cls.CONFIG_FILE)
+                if "backup_password" in settings:
+                    del settings["backup_password"]
+                    cls._write_config(cls.CONFIG_FILE, settings)
+                return True
+            except Exception as e:
+                print(f"Nie można zapisać hasła w keyringu, używam zapasowego pliku: {e}")
+        
+        # Fallback: brak keyringu
         settings = cls._read_config(cls.CONFIG_FILE)
-        import base64
-        # Kodowanie base64 dla podstawowego zabezpieczenia (nie jest to silne szyfrowanie)
         encoded_password = base64.b64encode(password.encode('utf-8')).decode('utf-8')
         settings["backup_password"] = encoded_password
         return cls._write_config(cls.CONFIG_FILE, settings)
     
     @classmethod
     def load_backup_password(cls):
-        """Wczytuje własne hasło do backupów sesji."""
+        """Wczytuje własne hasło do backupów sesji (keyring, z fallbackiem na plik)."""
+        if _HAS_KEYRING:
+            try:
+                password = keyring.get_password(cls.KEYRING_SERVICE, cls.KEYRING_USERNAME)
+                if password:
+                    return password
+            except Exception as e:
+                print(f"Nie można wczytać hasła z keyringu: {e}")
+        
+        # Fallback: stary/zapasowy wpis w pliku konfiguracyjnym
         settings = cls._read_config(cls.CONFIG_FILE)
         encoded_password = settings.get("backup_password")
         if encoded_password:
-            import base64
             try:
                 return base64.b64decode(encoded_password.encode('utf-8')).decode('utf-8')
             except Exception as e:
                 print(f"Błąd dekodowania hasła backupu: {e}")
-                return None
         return None
     
     @classmethod
     def delete_backup_password(cls):
         """Usuwa własne hasło do backupów (przywraca domyślne)."""
+        if _HAS_KEYRING:
+            try:
+                keyring.delete_password(cls.KEYRING_SERVICE, cls.KEYRING_USERNAME)
+            except keyring.errors.PasswordDeleteError:
+                pass  # nie było zapisane w keyringu - nic do usunięcia
+            except Exception as e:
+                print(f"Nie można usunąć hasła z keyringu: {e}")
+        
         settings = cls._read_config(cls.CONFIG_FILE)
         if "backup_password" in settings:
             del settings["backup_password"]
-        return cls._write_config(cls.CONFIG_FILE, settings)
-
-        
-        
-#------------------------------- Szyfrowanie -------------------------------
+            return cls._write_config(cls.CONFIG_FILE, settings)
+        return True
 
 class EncryptionCEO:
     
@@ -238,24 +271,6 @@ class EncryptionCEO:
         if padding_length < 1 or padding_length > 16:
             raise ValueError("Nieprawidłowy padding")
         return padded_data[:-padding_length]
-    
-    def _serpent_encrypt_with_iv(self, key, iv, data):
-        """Szyfrowanie Serpent-CBC"""
-        
-        try:
-            return serpent_cbc_encrypt(key, iv, data)
-        except TypeError:
-            combined = iv + data
-            encrypted = serpent_cbc_encrypt(key, combined)
-            return encrypted
-    
-    def _serpent_decrypt_with_iv(self, key, iv, data):
-        """Deszyfrowanie Serpent-CBC z IV """
-        try:
-            return serpent_cbc_decrypt(key, iv, data)
-        except TypeError:
-            decrypted = serpent_cbc_decrypt(key, data)
-            return decrypted[16:]
     
     def encrypt_data(self, password, data):
         """Szyfruje dane AES-GCM lub AES-GCM + Serpent-CBC"""
@@ -400,130 +415,3 @@ class EncryptionCEO:
         
         return decrypted_data
     
-    def encrypt_file(self, password, input_path, output_path, progress_callback=None):
-        try:
-            with open(input_path, 'rb') as f:
-                data = f.read()
-                
-            if progress_callback:
-                progress_callback(50)
-                
-            encrypted = self.encrypt_data(password, data)
-            
-            if progress_callback:
-                progress_callback(100)
-                
-            with open(output_path, 'wb') as f:
-                f.write(encrypted)
-                
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd szyfrowania pliku: {e}")
-        
-    def decrypt_file(self, password, input_path, output_path, progress_callback=None):
-        try:
-            with open(input_path, 'rb') as f:
-                encrypted_data = f.read()
-                
-            if progress_callback:
-                progress_callback(50)
-                
-            decrypted = self.decrypt_data(password, encrypted_data)
-            
-            if progress_callback:
-                progress_callback(100)
-                
-            with open(output_path, 'wb') as f:
-                f.write(decrypted)
-                
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd odszyfrowywania pliku: {e}")
-        
-    def encrypt_data_chunked(self, password, input_path, output_path, chunk_size=50*1024*1024, progress_callback=None):
-        """Szyfrowanie pliku chunkami z obsługą trybu kaskadowego i standardowego"""
-        try:
-            file_size = os.path.getsize(input_path)
-            num_chunks = (file_size + chunk_size - 1) // chunk_size
-            
-            if self.use_cascade:
-                # Przygotowanie dla szyfrowania kaskadowego
-                aes_salt = os.urandom(self.SALT_SIZE)
-                aes_nonce_base = os.urandom(self.NONCE_SIZE)
-                aes_key = self.generate_key(password, aes_salt)
-                
-                serpent_salt = os.urandom(self.SALT_SIZE)
-                serpent_key = self.generate_serpent_key(password, serpent_salt)
-                
-                with open(input_path, 'rb') as f_in:
-                    with open(output_path, 'wb') as f_out:
-                        # Nagłówek kaskadowy (bez IV - będzie w każdym chunku)
-                        f_out.write(self.CASCADE_VERSION.encode('utf-8'))
-                        f_out.write(aes_salt)
-                        f_out.write(aes_nonce_base)
-                        f_out.write(serpent_salt)
-                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
-                        
-                        processed = 0
-                        aesgcm = AESGCM(aes_key)
-                        
-                        for chunk_idx in range(num_chunks):
-                            chunk = f_in.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            # Krok 1: AES-GCM
-                            aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, byteorder='big')
-                            aes_encrypted = aesgcm.encrypt(aes_nonce, chunk, None)
-                            
-                            # Krok 2: Serpent-CBC - każdy chunk ma własny IV
-                            chunk_iv = os.urandom(self.SERPENT_BLOCK_SIZE)
-                            
-                            # Padding i przygotowanie danych (IV + dane)
-                            padded_data = self._pad_pkcs7(aes_encrypted, self.SERPENT_BLOCK_SIZE)
-                            combined_data = chunk_iv + padded_data
-                            
-                            # Szyfrowanie Serpent
-                            serpent_encrypted = serpent_cbc_encrypt(serpent_key, combined_data)
-                            
-                            # Zapisz chunk
-                            f_out.write(len(serpent_encrypted).to_bytes(4, byteorder='big'))
-                            f_out.write(serpent_encrypted)
-                            
-                            processed += len(chunk)
-                            if progress_callback and file_size > 0:
-                                progress_callback(int(processed / file_size * 100))
-            else:
-                # Standardowe szyfrowanie AES-GCM
-                salt = os.urandom(self.SALT_SIZE)
-                nonce_base = os.urandom(self.NONCE_SIZE)
-                key = self.generate_key(password, salt)
-                
-                with open(input_path, 'rb') as f_in:
-                    with open(output_path, 'wb') as f_out:
-                        f_out.write(self.ENCRYPTION_VERSION.encode('utf-8'))
-                        f_out.write(salt)
-                        f_out.write(nonce_base)
-                        f_out.write(num_chunks.to_bytes(8, byteorder='big'))
-                        
-                        processed = 0
-                        aesgcm = AESGCM(key)
-                        
-                        for chunk_idx in range(num_chunks):
-                            chunk = f_in.read(chunk_size)
-                            if not chunk:
-                                break
-                            
-                            nonce = nonce_base + chunk_idx.to_bytes(4, byteorder='big')
-                            encrypted_chunk = aesgcm.encrypt(nonce, chunk, None)
-                            
-                            f_out.write(len(encrypted_chunk).to_bytes(4, byteorder='big'))
-                            f_out.write(encrypted_chunk)
-                            
-                            processed += len(chunk)
-                            if progress_callback and file_size > 0:
-                                progress_callback(int(processed / file_size * 100))
-            
-            return True
-        except Exception as e:
-            raise Exception(f"Błąd szyfrowania pliku: {e}")

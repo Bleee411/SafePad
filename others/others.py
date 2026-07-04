@@ -14,25 +14,34 @@ from datetime import datetime
 import multiprocessing
 
 
-def secure_delete(file_path, passes=3):
+def secure_delete(file_path, passes=3, chunk_size=16 * 1024 * 1024):
     """
     Bezpiecznie usuwa plik poprzez nadpisanie go losowymi danymi.
+    
+    Nadpisywanie odbywa się w kawałkach (chunk_size), a nie jednym
+    `os.urandom(file_size)` na cały plik naraz - dzięki temu duże pliki
+    (np. wieloGB zaszyfrowane archiwa folderów) nie powodują skoku zużycia
+    pamięci RAM proporcjonalnego do rozmiaru pliku.
     
     Args:
         file_path: Ścieżka do pliku do usunięcia
         passes: Liczba przejść nadpisywania
+        chunk_size: Rozmiar kawałka nadpisywanego na raz (w bajtach)
     """
     if not os.path.exists(file_path):
         return
     
     try:
-        # Pobierz rozmiar pliku
         file_size = os.path.getsize(file_path)
         
-        with open(file_path, 'wb') as f:
+        with open(file_path, 'r+b') as f:
             for _ in range(passes):
                 f.seek(0)
-                f.write(os.urandom(file_size))
+                remaining = file_size
+                while remaining > 0:
+                    write_size = min(chunk_size, remaining)
+                    f.write(os.urandom(write_size))
+                    remaining -= write_size
                 f.flush()
                 os.fsync(f.fileno())
         
@@ -80,6 +89,44 @@ def get_temp_file_path(prefix="safepad"):
     return os.path.join(temp_dir, f"{prefix}_{timestamp}.tmp")
 
 
+def check_password_requirements(password, settings):
+    """
+    Sprawdza hasło pod kątem wymagań skonfigurowanych w ustawieniach
+    aplikacji (długość minimalna, wielkie/małe litery, cyfry, znaki
+    specjalne). Wcześniej te ustawienia były zapisywane i pokazywane w
+    oknie Ustawień, ale nigdzie faktycznie nie były egzekwowane przy
+    tworzeniu nowego hasła - były czysto kosmetyczne.
+    
+    Args:
+        password: Hasło do sprawdzenia
+        settings: Słownik ustawień (z Registryconf.load_settings())
+    
+    Returns:
+        tuple(bool, list[str]): (czy_spelnia_wymagania, lista_opisow_bledow)
+    """
+    errors = []
+    
+    min_length = settings.get("password_min_length", 8)
+    if len(password) < min_length:
+        errors.append(f"Hasło musi mieć co najmniej {min_length} znaków")
+    
+    if settings.get("password_require_upper", True) and not any(c.isupper() for c in password):
+        errors.append("Hasło musi zawierać przynajmniej jedną wielką literę")
+    
+    if settings.get("password_require_lower", True) and not any(c.islower() for c in password):
+        errors.append("Hasło musi zawierać przynajmniej jedną małą literę")
+    
+    if settings.get("password_require_number", True) and not any(c.isdigit() for c in password):
+        errors.append("Hasło musi zawierać przynajmniej jedną cyfrę")
+    
+    if settings.get("password_require_special", False):
+        special_chars = set("!@#$%^&*()-_=+[]{}|;:'\",.<>/?`~\\")
+        if not any(c in special_chars for c in password):
+            errors.append("Hasło musi zawierać przynajmniej jeden znak specjalny")
+    
+    return (len(errors) == 0, errors)
+
+
 def ensure_directory_exists(directory_path):
     """
     Tworzy katalog jeśli nie istnieje.
@@ -112,7 +159,6 @@ def clear_temp_files(keep_last=5):
         keep_last: Liczba plików do zachowania
     """
     temp_dir = tempfile.gettempdir()
-    pattern = "safepad_*.tmp"
     
     try:
         files = []

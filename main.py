@@ -2,11 +2,12 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.0-BETA.2
+Wersja: 2.2.1
 """
 
 import sys
 import os
+import secrets
 import tempfile
 import shutil
 import zipfile
@@ -19,16 +20,40 @@ from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
 from PyQt6.QtGui import QAction
 
 from others.languages import LanguageManager
-import subprocess
 from others.languages import tr, format_tr, LanguageManager
 from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
-from others.others import Argon2Benchmark, is_benchmark_needed
+from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, check_password_requirements
 
-APP_VERSION = "2.2.0-BETA.2"
+APP_VERSION = "2.2.1"
 AUTHOR = "Szofer"
 
-DEFAULT_BACKUP_PASSWORD = "U2FsdGVkX187GOHqhIryMT+tJgiOcwSNH6UkWAw80Y37xpUsp40tC/+59LY6DIqm7G8+9y+44PIfqmVl8lnb72rhmZKN/UWN7J1JMPXlJ8I="
+# NOTE: wcześniej w tym miejscu znajdowała się pojedyncza, zakodowana na stałe stała DEFAULT_BACKUP_PASSWORD,
+# wspólna dla wszystkich instalacji tej aplikacji open source. Ponieważ kod źródłowy jest
+# publiczny, to „domyślne” hasło również było publiczne, więc „zaszyfrowana”
+# automatycznie zapisana kopia zapasowa sesji była w praktyce niezabezpieczona dla każdego użytkownika, który
+# nie ustawił własnego hasła do kopii zapasowej. Została ona usunięta – zobacz
+# SafePadApp.load_backup_password(), która teraz generuje unikalne losowe
+# hasło dla każdej instalacji (przechowywane w systemowym pęku kluczy – zobacz
+# Registryconf.save_backup_password) zamiast wspólnego sekretu wbudowanego w
+# kod źródłowy.
+
+
+def _session_backup_path():
+    """Ścieżka do zaszyfrowanego backupu sesji.
+    
+    Zawiera identyfikator użytkownika (UID), ponieważ tempfile.gettempdir()
+    na Linuksie zwykle wskazuje na WSPÓLNY dla wszystkich użytkowników /tmp
+    (w przeciwieństwie do Windows, gdzie %TEMP% jest już per-user). Bez tego
+    dwie osoby korzystające z tego samego komputera kolidowałyby na tej samej
+    nazwie pliku - albo nadpisując sobie backupy, albo (gdy /tmp ma sticky
+    bit i plik już istnieje z uprawnieniami innego właściciela) blokując
+    sobie nawzajem możliwość zapisu."""
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        uid = "unknown"
+    return os.path.join(tempfile.gettempdir(), f"safepad_session_backup_{uid}.sscr")
 
 
 class FolderEncryptWorker(QThread):
@@ -161,7 +186,7 @@ class FolderEncryptWorker(QThread):
                             self.progress.emit(30 + int((processed / file_size) * 60))
         
         # Bezpieczne usunięcie pliku tymczasowego ZIP
-        self._secure_delete(temp_zip)
+        secure_delete(temp_zip)
         shutil.rmtree(temp_dir, ignore_errors=True)
         
         self.progress.emit(100)
@@ -299,37 +324,51 @@ class FolderDecryptWorker(QThread):
         self._extract_zip(temp_zip)
     
     def _extract_zip(self, temp_zip):
-        """Wypakowuje pliki ZIP i czyści"""
+        """Wypakowuje pliki ZIP do folderu tymczasowego (staging) i dopiero po
+        pełnym powodzeniu podmienia docelowy folder. Dzięki temu błędne hasło
+        lub uszkodzone dane nigdy nie niszczą istniejącego folderu docelowego."""
         self.status.emit("Wypakowywanie plików...")
         
         if not zipfile.is_zipfile(temp_zip):
             raise ValueError("Odszyfrowane dane nie są prawidłowym archiwum ZIP")
         
-        with zipfile.ZipFile(temp_zip, 'r') as zipf:
-            files = zipf.namelist()
-            for i, name in enumerate(files):
-                safe_path = os.path.normpath(os.path.join(self.output_folder, name))
-                if not safe_path.startswith(os.path.normpath(self.output_folder)):
-                    raise ValueError("Wykryto niebezpieczną ścieżkę w archiwum")
-                
-                zipf.extract(name, self.output_folder)
-                self.progress.emit(50 + int(((i + 1) / len(files)) * 50))
+        staging_dir = tempfile.mkdtemp(prefix="safepad_extract_")
+        try:
+            with zipfile.ZipFile(temp_zip, 'r') as zipf:
+                files = zipf.namelist()
+                staging_root = os.path.normpath(os.path.abspath(staging_dir))
+                for i, name in enumerate(files):
+                    safe_path = os.path.normpath(os.path.abspath(os.path.join(staging_root, name)))
+                    # Use os.path.commonpath instead of startswith to avoid the classic
+                    # "C:\out" matching "C:\out_evil" prefix bypass.
+                    if os.path.commonpath([staging_root, safe_path]) != staging_root:
+                        raise ValueError("Wykryto niebezpieczną ścieżkę w archiwum")
+                    
+                    zipf.extract(name, staging_dir)
+                    self.progress.emit(50 + int(((i + 1) / len(files)) * 40))
+            
+            # Wypakowanie się powiodło - dopiero teraz można bezpiecznie
+            # podmienić istniejący folder docelowy (jeśli istnieje).
+            if os.path.exists(self.output_folder):
+                shutil.rmtree(self.output_folder)
+            
+            parent_dir = os.path.dirname(os.path.normpath(self.output_folder))
+            if parent_dir:
+                os.makedirs(parent_dir, exist_ok=True)
+            shutil.move(staging_dir, self.output_folder)
+            
+        except Exception:
+            # Cokolwiek pójdzie nie tak, sprzątamy staging i nie ruszamy
+            # istniejącego folderu docelowego.
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
         
-        self._secure_delete(temp_zip)
+        secure_delete(temp_zip)
         temp_dir = os.path.dirname(temp_zip)
         shutil.rmtree(temp_dir, ignore_errors=True)
         
         self.progress.emit(100)
         self.finished.emit(f"Folder odszyfrowany do: {os.path.basename(self.output_folder)}")
-    
-    def _secure_delete(self, file_path):
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, 'wb') as f:
-                    f.write(b'\x00' * os.path.getsize(file_path))
-                os.remove(file_path)
-            except:
-                pass
 
 class SafePadApp:
     """Główna klasa aplikacji - łączy GUI z logiką"""
@@ -518,6 +557,15 @@ class SafePadApp:
                 if not ok or not pwd:
                     return False
                 
+                is_valid, errors = check_password_requirements(pwd, self.settings)
+                if not is_valid:
+                    QMessageBox.critical(
+                        self.gui, "Hasło nie spełnia wymagań",
+                        "Hasło nie spełnia skonfigurowanych wymagań bezpieczeństwa:\n\n"
+                        + "\n".join(f"• {e}" for e in errors)
+                    )
+                    return False
+                
                 confirm, ok = QInputDialog.getText(
                     self.gui, "Potwierdź", "Powtórz hasło:", QLineEdit.EchoMode.Password
                 )
@@ -569,6 +617,15 @@ class SafePadApp:
             self.gui, "Hasło", "Hasło do szyfrowania folderu:", QLineEdit.EchoMode.Password
         )
         if not ok or not password:
+            return
+        
+        is_valid, errors = check_password_requirements(password, self.settings)
+        if not is_valid:
+            QMessageBox.critical(
+                self.gui, "Hasło nie spełnia wymagań",
+                "Hasło nie spełnia skonfigurowanych wymagań bezpieczeństwa:\n\n"
+                + "\n".join(f"• {e}" for e in errors)
+            )
             return
         
         confirm, ok = QInputDialog.getText(
@@ -625,10 +682,10 @@ class SafePadApp:
             )
             if reply == QMessageBox.StandardButton.No:
                 return
-            try:
-                shutil.rmtree(final_output_path)
-            except:
-                pass
+            # UWAGA: folder docelowy NIE jest usuwany tutaj. Dopiero po
+            # pomyślnym odszyfrowaniu i wypakowaniu (patrz FolderDecryptWorker
+            # ._extract_zip) zostanie on nadpisany, żeby błędne hasło nie
+            # zniszczyło istniejących danych użytkownika.
         
         password, ok = QInputDialog.getText(
             self.gui, "Hasło", "Hasło do odszyfrowania:", QLineEdit.EchoMode.Password
@@ -654,9 +711,24 @@ class SafePadApp:
     
     def _cancel_crypto(self):
         if self.crypto_worker and self.crypto_worker.isRunning():
+            output_path = getattr(self.crypto_worker, 'output_path', None) or \
+                          getattr(self.crypto_worker, 'output_folder', None)
+            
             self.crypto_worker.terminate()
             self.crypto_worker.wait()
             self.progress.close()
+            
+            # Terminating mid-write can leave a partial/corrupt output file
+            # or folder behind - clean it up so it isn't mistaken for a
+            # valid (but undecryptable) result.
+            try:
+                if output_path and os.path.isfile(output_path):
+                    secure_delete(output_path)
+                elif output_path and os.path.isdir(output_path):
+                    shutil.rmtree(output_path, ignore_errors=True)
+            except Exception:
+                pass
+            
             self.gui.update_status("Operacja anulowana", is_error=True)
     
     def _on_encrypt_finished(self, message):
@@ -690,13 +762,26 @@ class SafePadApp:
     
     
     
+    @staticmethod
+    def _generate_backup_password():
+        """Generuje losowe, unikalne dla tej instalacji hasło do backupów sesji."""
+        return secrets.token_urlsafe(32)
+    
     def load_backup_password(self):
-        """Wczytaj własne hasło do backupów lub użyj domyślnego"""
+        """Wczytaj hasło do backupów sesji (przechowywane w systemowym
+        keyringu - patrz Registryconf.save_backup_password).
+        
+        Jeśli żadne hasło nie zostało jeszcze zapisane (pierwsze uruchomienie),
+        generujemy nowe, losowe hasło unikalne dla tej instalacji zamiast
+        polegać na jednym haśle domyślnym wspólnym dla wszystkich instalacji
+        programu (jak to było wcześniej, jako publiczna stała w kodzie
+        źródłowym)."""
         stored_password = Registryconf.load_backup_password()
         if stored_password:
             self.backup_password = stored_password
         else:
-            self.backup_password = DEFAULT_BACKUP_PASSWORD
+            self.backup_password = self._generate_backup_password()
+            Registryconf.save_backup_password(self.backup_password)
     
     def get_backup_password(self):
         """Pobierz aktualne hasło do backupów"""
@@ -707,7 +792,7 @@ class SafePadApp:
     def save_to_temp_file(self):
         """Zapisz sesję do pliku tymczasowego z użyciem własnego hasła"""
         try:
-            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+            temp_file = _session_backup_path()
             text = self.gui.text_edit.toPlainText()
             if text:
                 # Użyj własnego hasła do backupów
@@ -715,13 +800,17 @@ class SafePadApp:
                 encrypted = self.crypto.encrypt_data(backup_pwd, text.encode('utf-8'))
                 with open(temp_file, 'wb') as f:
                     f.write(encrypted)
+                try:
+                    os.chmod(temp_file, 0o600)
+                except OSError:
+                    pass
         except Exception as e:
             print(f"Błąd zapisu sesji: {e}")
     
     def load_from_temp_file(self):
         """Wczytaj sesję z pliku tymczasowego z użyciem własnego hasła"""
         try:
-            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+            temp_file = _session_backup_path()
             if os.path.exists(temp_file):
                 with open(temp_file, 'rb') as f:
                     encrypted = f.read()
@@ -803,50 +892,6 @@ Kod programu jest otwarty. Możesz swobodnie z niego korzystać, audytować pod 
             self.save_to_temp_file()
         QApplication.quit()
         
-        
-# ------------------------- Argon2Benchmark -------------------------
-
-def run_argon2_benchmark(self):
-    """Uruchamia benchmark Argon2ID i zapisuje wyniki"""
-    from PyQt6.QtWidgets import QProgressDialog
-    
-    self.progress = QProgressDialog("Uruchamianie benchmarku...", "Anuluj", 0, 100, self.gui)
-    self.progress.setWindowTitle("Benchmark Argon2ID")
-    self.progress.setWindowModality(Qt.WindowModality.WindowModal)
-    self.progress.setAutoClose(True)
-    self.progress.setMinimumDuration(0)
-    
-    def on_progress(value):
-        self.progress.setValue(value)
-    
-    def on_status(status):
-        self.progress.setLabelText(status)
-    
-    try:
-        results = Argon2Benchmark.run_benchmark(
-            progress_callback=on_progress,
-            status_callback=on_status
-        )
-        
-        # Zapisz wyniki do rejestru
-        Argon2Benchmark.save_benchmark_results(Registryconf, results)
-        
-        self.progress.close()
-        QMessageBox.information(
-            self.gui, "Benchmark zakończony",
-            f"Optymalne parametry dla twojego komputera:\n\n"
-            f"Pamięć: {results['m'] // 1024} MB\n"
-            f"Iteracje: {results['t']}\n"
-            f"Wątki: {results['p']}\n\n"
-            f"Parametry zostały zapisane w rejestrze."
-        )
-        
-        # Odśwież szyfrowanie z nowymi parametrami
-        self.crypto = EncryptionCEO(self.settings.get("encryption_level", "medium"))
-        
-    except Exception as e:
-        self.progress.close()
-        QMessageBox.critical(self.gui, "Błąd", f"Benchmark nie powiódł się:\n{e}")
 
 
 def main():
