@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.1
+Wersja: 2.2.2
 """
 
 import sys
@@ -25,7 +25,7 @@ from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
 from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, check_password_requirements
 
-APP_VERSION = "2.2.1"
+APP_VERSION = "2.2.2"
 AUTHOR = "Szofer"
 
 # NOTE: wcześniej w tym miejscu znajdowała się pojedyncza, zakodowana na stałe stała DEFAULT_BACKUP_PASSWORD,
@@ -56,6 +56,13 @@ def _session_backup_path():
     return os.path.join(tempfile.gettempdir(), f"safepad_session_backup_{uid}.sscr")
 
 
+class _WorkerCancelled(Exception):
+    """Sygnalizuje, że użytkownik poprosił o anulowanie operacji - używane
+    do współpracującego (cooperative) przerywania wątków szyfrowania /
+    deszyfrowania zamiast niebezpiecznego QThread.terminate()."""
+    pass
+
+
 class FolderEncryptWorker(QThread):
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
@@ -69,7 +76,15 @@ class FolderEncryptWorker(QThread):
         self.folder_path = folder_path
         self.output_path = output_path
         self.CHUNK_SIZE = 50 * 1024 * 1024
-    
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        """Prosi wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
+        (zamiast wymuszania QThread.terminate(), które może przerwać wątek
+        w trakcie zapisu/operacji na plikach i zostawić rzeczy w
+        niespójnym stanie)."""
+        self._cancel_requested = True
+
     def run(self):
       try:
         self.status.emit("Pakowanie plików...")
@@ -130,6 +145,9 @@ class FolderEncryptWorker(QThread):
                     
                     processed = 0
                     for chunk_idx in range(num_chunks):
+                        if self._cancel_requested:
+                            raise _WorkerCancelled()
+
                         chunk = f_in.read(self.CHUNK_SIZE)
                         if not chunk:
                             break
@@ -171,6 +189,9 @@ class FolderEncryptWorker(QThread):
                     
                     processed = 0
                     for chunk_idx in range(num_chunks):
+                        if self._cancel_requested:
+                            raise _WorkerCancelled()
+
                         chunk = f_in.read(self.CHUNK_SIZE)
                         if not chunk:
                             break
@@ -191,7 +212,21 @@ class FolderEncryptWorker(QThread):
         
         self.progress.emit(100)
         self.finished.emit(f"Folder zaszyfrowany: {os.path.basename(self.output_path)}")
-        
+
+      except _WorkerCancelled:
+        try:
+            secure_delete(temp_zip)
+        except Exception:
+            pass
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(self.output_path):
+                secure_delete(self.output_path)
+        except Exception:
+            pass
       except Exception as e:
         self.error.emit(str(e))
 
@@ -208,7 +243,13 @@ class FolderDecryptWorker(QThread):
         self.encrypted_path = encrypted_path
         self.output_folder = output_folder
         self.CHUNK_SIZE = 50 * 1024 * 1024
-    
+        self._cancel_requested = False
+
+    def request_cancel(self):
+        """Prosi wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
+        (zamiast QThread.terminate())."""
+        self._cancel_requested = True
+
     def run(self):
         try:
             self.status.emit("Odczytywanie pliku...")
@@ -224,6 +265,8 @@ class FolderDecryptWorker(QThread):
                 else:
                     raise ValueError(f"Nieobsługiwana wersja: {version}")
             
+        except _WorkerCancelled:
+            pass
         except Exception as e:
             error_msg = str(e)
             # Sprawdź czy to błąd hasła
@@ -251,22 +294,29 @@ class FolderDecryptWorker(QThread):
         
         aesgcm = AESGCM(key)
         
-        with open(temp_zip, 'wb') as f_out:
-            for chunk_idx in range(num_chunks):
-                chunk_len = int.from_bytes(f_in.read(4), 'big')
-                encrypted_chunk = f_in.read(chunk_len)
-                
-                nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
-                try:
-                    decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
-                except Exception as e:
-                    raise ValueError(f"Błąd autoryzacji AES-GCM - prawdopodobnie nieprawidłowe hasło: {e}")
-                
-                f_out.write(decrypted_chunk)
-                
-                if num_chunks > 0:
-                    self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-        
+        try:
+            with open(temp_zip, 'wb') as f_out:
+                for chunk_idx in range(num_chunks):
+                    if self._cancel_requested:
+                        raise _WorkerCancelled()
+
+                    chunk_len = int.from_bytes(f_in.read(4), 'big')
+                    encrypted_chunk = f_in.read(chunk_len)
+
+                    nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
+                    try:
+                        decrypted_chunk = aesgcm.decrypt(nonce, encrypted_chunk, None)
+                    except Exception:
+                        raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
+
+                    f_out.write(decrypted_chunk)
+
+                    if num_chunks > 0:
+                        self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
+        except _WorkerCancelled:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
         self._extract_zip(temp_zip)
     
     def _decrypt_cascade(self, f_in):
@@ -291,36 +341,48 @@ class FolderDecryptWorker(QThread):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         aesgcm = AESGCM(aes_key)
         
-        with open(temp_zip, 'wb') as f_out:
+        try:
+          with open(temp_zip, 'wb') as f_out:
             for chunk_idx in range(num_chunks):
+                if self._cancel_requested:
+                    raise _WorkerCancelled()
+
                 chunk_len = int.from_bytes(f_in.read(4), 'big')
                 serpent_encrypted = f_in.read(chunk_len)
                 
+                # UWAGA - ochrona przed atakiem typu padding oracle: oba etapy
+                # (Serpent-CBC/unpad oraz AES-GCM) muszą zgłaszać identyczny,
+                # nieodróżnialny komunikat błędu. Patrz komentarz w
+                # crypto/encryption_decryption.py -> _decrypt_cascade.
+                generic_error = "Nieprawidłowe hasło lub uszkodzone dane"
+
                 # Krok 1: Odszyfruj Serpent
                 try:
                     decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
-                    
-                    # Wyciągnij IV i dane
-                    chunk_iv = decrypted_combined[:16]
+
+                    # Wyciągnij dane (pomijając IV)
                     padded_aes = decrypted_combined[16:]
-                    
-                    # Usuń padding
+
+                    # Usuń padding (pełna walidacja w czasie stałym)
                     aes_encrypted = self.crypto._unpad_pkcs7(padded_aes)
-                    
-                except Exception as e:
-                    raise ValueError(f"Błąd deszyfrowania Serpent - prawdopodobnie nieprawidłowe hasło: {e}")
-                
+
+                except Exception:
+                    raise ValueError(generic_error)
+
                 # Krok 2: Odszyfruj AES
                 aes_nonce = aes_nonce_base + chunk_idx.to_bytes(4, 'big')
                 try:
                     decrypted_chunk = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
                     f_out.write(decrypted_chunk)
-                except Exception as e:
-                    raise ValueError(f"Błąd deszyfrowania AES - prawdopodobnie nieprawidłowe hasło: {e}")
+                except Exception:
+                    raise ValueError(generic_error)
                 
                 if num_chunks > 0:
                     self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-        
+        except _WorkerCancelled:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
+
         self._extract_zip(temp_zip)
     
     def _extract_zip(self, temp_zip):
@@ -713,8 +775,13 @@ class SafePadApp:
         if self.crypto_worker and self.crypto_worker.isRunning():
             output_path = getattr(self.crypto_worker, 'output_path', None) or \
                           getattr(self.crypto_worker, 'output_folder', None)
-            
-            self.crypto_worker.terminate()
+
+            # Proś wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
+            # (między chunkami) zamiast wymuszać terminate(), które może
+            # przerwać wątek w trakcie zapisu do pliku i zostawić dane w
+            # niespójnym stanie (np. częściowo zapisany plik/uszkodzony
+            # folder tymczasowy).
+            self.crypto_worker.request_cancel()
             self.crypto_worker.wait()
             self.progress.close()
             
