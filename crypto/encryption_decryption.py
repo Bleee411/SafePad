@@ -1,6 +1,6 @@
 import os
 import json
-import hashlib
+import hmac
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
@@ -349,11 +349,25 @@ class EncryptionCEO:
         return data + padding
     
     @staticmethod
-    def _unpad_pkcs7(padded_data):
-        """Usuwa padding PKCS7"""
-        padding_length = padded_data[-1]
-        if padding_length < 1 or padding_length > 16:
+    def _unpad_pkcs7(padded_data, block_size=16):
+        """Usuwa padding PKCS7.
+
+        Weryfikuje WSZYSTKIE bajty paddingu (nie tylko ostatni) w czasie
+        stałym (hmac.compare_digest), żeby nie dawać atakującemu żadnej
+        dodatkowej informacji o tym, w którym miejscu padding jest
+        nieprawidłowy (ochrona przed atakiem typu padding oracle)."""
+        if len(padded_data) < block_size or len(padded_data) % block_size != 0:
             raise ValueError("Nieprawidłowy padding")
+
+        padding_length = padded_data[-1]
+        if padding_length < 1 or padding_length > block_size:
+            raise ValueError("Nieprawidłowy padding")
+
+        expected = bytes([padding_length]) * padding_length
+        actual = padded_data[-padding_length:]
+        if not hmac.compare_digest(actual, expected):
+            raise ValueError("Nieprawidłowy padding")
+
         return padded_data[:-padding_length]
     
     def encrypt_data(self, password, data):
@@ -441,10 +455,13 @@ class EncryptionCEO:
         nonce = encrypted_data[4 + self.SALT_SIZE:header_size]
         ciphertext = encrypted_data[header_size:]
         
-        key = self.generate_key(password, salt)
-        aesgcm = AESGCM(key)
-        decrypted_data = aesgcm.decrypt(nonce, ciphertext, None)
-        
+        try:
+            key = self.generate_key(password, salt)
+            aesgcm = AESGCM(key)
+            decrypted_data = aesgcm.decrypt(nonce, ciphertext, None)
+        except Exception:
+            raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
+
         return decrypted_data
     
     def _decrypt_cascade(self, password, encrypted_data):
@@ -472,31 +489,40 @@ class EncryptionCEO:
         # Reszta to zaszyfrowane dane Serpent (zawierające IV + dane AES)
         serpent_encrypted = encrypted_data[pos:]
         
+        # UWAGA - ochrona przed atakiem typu padding oracle:
+        # Poniższe dwa etapy (deszyfrowanie/unpad Serpent-CBC oraz weryfikacja
+        # tagu AES-GCM) CELOWO zgłaszają identyczny, ogólny komunikat błędu.
+        # Wcześniej każdy etap miał inny tekst błędu ("błąd Serpent" vs
+        # "błąd AES-GCM"), co pozwalało atakującemu - przez obserwację, który
+        # komunikat się pojawia dla spreparowanych danych - odróżnić błąd
+        # paddingu CBC od błędu autentykacji GCM. To klasyczny warunek do
+        # ataku Vaudenay'a (CBC padding oracle), niezależny od siły hasła.
+        # Nie zmieniaj poniższego zachowania bez zachowania jednego,
+        # nieodróżnialnego komunikatu błędu dla obu etapów.
+        generic_error = "Nieprawidłowe hasło lub uszkodzone dane"
+
         # Krok 1: Odszyfrowanie Serpent-CBC
-        serpent_key = self.generate_serpent_key(password, serpent_salt)
         try:
+            serpent_key = self.generate_serpent_key(password, serpent_salt)
             # Deszyfruj Serpent (zwraca IV + padded AES data)
             decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
-            
+
             # Wyciągnij IV i dane
-            serpent_iv = decrypted_combined[:self.SERPENT_BLOCK_SIZE]
             padded_aes = decrypted_combined[self.SERPENT_BLOCK_SIZE:]
-            
-            # Usuń padding PKCS7
+
+            # Usuń padding PKCS7 (walidacja pełnego paddingu w czasie stałym)
             aes_encrypted = self._unpad_pkcs7(padded_aes)
-            
-        except Exception as e:
-            raise ValueError(f"Nieprawidłowe hasło lub uszkodzone dane (błąd Serpent): {e}")
-        
+        except Exception:
+            raise ValueError(generic_error)
+
         # Krok 2: Odszyfrowanie AES-GCM
-        aes_key = self.generate_key(password, aes_salt)
-        aesgcm = AESGCM(aes_key)
-        
         try:
+            aes_key = self.generate_key(password, aes_salt)
+            aesgcm = AESGCM(aes_key)
             decrypted_data = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
-        except Exception as e:
-            raise ValueError(f"Nieprawidłowe hasło lub uszkodzone dane (błąd AES-GCM): {e}")
-        
+        except Exception:
+            raise ValueError(generic_error)
+
         return decrypted_data
     
     # NOTE: tutaj istniał martwy kod run_argon2_benchmark, który został usunięty, ponieważ nie był wywoływany i nie był powiązany z żadną klasą. Logika benchmarku Argon2ID została przeniesiona do ui.py (SettingsDialog.run_benchmark / BenchmarkThread).
