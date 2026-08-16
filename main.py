@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.2
+Wersja: 2.2.2h
 """
 
 import sys
@@ -28,7 +28,7 @@ from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, c
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
-APP_VERSION = "2.2.2"
+APP_VERSION = "2.2.2h"
 AUTHOR = "Szofer"
 
 # NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca
@@ -767,8 +767,13 @@ class SafePadApp:
     
     def _cancel_crypto(self):
         if self.crypto_worker and self.crypto_worker.isRunning():
-            output_path = getattr(self.crypto_worker, 'output_path', None) or \
-                          getattr(self.crypto_worker, 'output_folder', None)
+            # HOTFIX: tylko plik wyjściowy (.enc z szyfrowania folderu) jest
+            # bezpieczny do usunięcia tutaj - jest on tworzony/nadpisywany
+            # przez ten proces od samego początku operacji.
+            # wcześniej folder użytkownika (gdy wybrał "nadpisz"), albo
+            # folder który jeszcze nie istnieje - w obu przypadkach usuwanie
+            # go tutaj było błędem niszczącym prawdziwe dane użytkownika.
+            output_path = getattr(self.crypto_worker, 'output_path', None)
 
             # Proś wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
             # (między chunkami) zamiast wymuszać terminate(), które może
@@ -782,8 +787,6 @@ class SafePadApp:
             try:
                 if output_path and os.path.isfile(output_path):
                     secure_delete(output_path)
-                elif output_path and os.path.isdir(output_path):
-                    shutil.rmtree(output_path, ignore_errors=True)
             except Exception:
                 pass
             
