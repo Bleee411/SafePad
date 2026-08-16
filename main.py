@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.2
+Wersja: 2.2.2h
 """
 
 import sys
@@ -15,45 +15,30 @@ from PyQt6.QtCore import QThread, pyqtSignal, Qt
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QFileDialog, QInputDialog, 
                              QProgressDialog, QLineEdit, QDialog, QPushButton)
 from PyQt6.QtGui import QIcon
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
+import ctypes
+from PyQt6.QtWidgets import QMenu
 from PyQt6.QtGui import QAction
 
-from others.languages import LanguageManager
 from others.languages import tr, format_tr, LanguageManager
 from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
 from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, check_password_requirements
 
-APP_VERSION = "2.2.2"
+ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
+
+APP_VERSION = "2.2.2h"
 AUTHOR = "Szofer"
 
-# NOTE: wcześniej w tym miejscu znajdowała się pojedyncza, zakodowana na stałe stała DEFAULT_BACKUP_PASSWORD,
-# wspólna dla wszystkich instalacji tej aplikacji open source. Ponieważ kod źródłowy jest
-# publiczny, to „domyślne” hasło również było publiczne, więc „zaszyfrowana”
-# automatycznie zapisana kopia zapasowa sesji była w praktyce niezabezpieczona dla każdego użytkownika, który
-# nie ustawił własnego hasła do kopii zapasowej. Została ona usunięta – zobacz
-# SafePadApp.load_backup_password(), która teraz generuje unikalne losowe
-# hasło dla każdej instalacji (przechowywane w systemowym pęku kluczy – zobacz
-# Registryconf.save_backup_password) zamiast wspólnego sekretu wbudowanego w
-# kod źródłowy.
-
-
-def _session_backup_path():
-    """Ścieżka do zaszyfrowanego backupu sesji.
-    
-    Zawiera identyfikator użytkownika (UID), ponieważ tempfile.gettempdir()
-    na Linuksie zwykle wskazuje na WSPÓLNY dla wszystkich użytkowników /tmp
-    (w przeciwieństwie do Windows, gdzie %TEMP% jest już per-user). Bez tego
-    dwie osoby korzystające z tego samego komputera kolidowałyby na tej samej
-    nazwie pliku - albo nadpisując sobie backupy, albo (gdy /tmp ma sticky
-    bit i plik już istnieje z uprawnieniami innego właściciela) blokując
-    sobie nawzajem możliwość zapisu."""
-    try:
-        uid = os.getuid()
-    except AttributeError:
-        uid = "unknown"
-    return os.path.join(tempfile.gettempdir(), f"safepad_session_backup_{uid}.sscr")
+# NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca
+# stałe domyslne hasło które nie chroniło kopi zapasowych. Ponieważ kod jest publiczny 
+# to "domyślne" hasło tak samo było publiczne, więc "zaszyfrowane" 
+# Automatyczne zapisywanie sesji kopiowej było praktycznie niechronione dla każdego użytkownika, który 
+# nie ustawił własnego hasła do kopii zapasowej. Został usunięty – zobacz 
+# SafePadApp.load_backup_password(), która teraz generuje unikalny losowy obraz 
+# hasło na instalację (chronione w spoczynku przez Windows DPAPI w 
+# Registryconf.save_backup_password) zamiast wspólnego sekretu wpisanego w nego kod zródłowy.
 
 
 class _WorkerCancelled(Exception):
@@ -432,6 +417,7 @@ class FolderDecryptWorker(QThread):
         self.progress.emit(100)
         self.finished.emit(f"Folder odszyfrowany do: {os.path.basename(self.output_folder)}")
 
+
 class SafePadApp:
     """Główna klasa aplikacji - łączy GUI z logiką"""
     
@@ -448,13 +434,16 @@ class SafePadApp:
         encryption_level = self.settings.get("encryption_level", "medium")
         self.crypto = EncryptionCEO(encryption_level)
         
+        # Wczytaj (lub wygeneruj przy pierwszym uruchomieniu) hasło do
+        # backupów sesji - musi być gotowe zanim spróbujemy odczytać
+        # ewentualną istniejącą sesję poniżej.
+        self.load_backup_password()
+        
         # GUI
         self.gui = SafePadGUI()
         
         # Podłącz sygnały
         self.connect_signals()
-        
-        self.load_backup_password()
         
         # Przywróć sesję
         self.load_from_temp_file()
@@ -524,6 +513,13 @@ class SafePadApp:
       if hasattr(self.gui, 'tray_icon') and self.gui.tray_icon:
           pass
     
+    def init_argon_params(self):
+        """Inicjalizuje domyślne parametry Argon2 w rejestrze"""
+        for level, params in Registryconf.DEFAULT_ARGON_PARAMS.items():
+            # Sprawdź czy istnieją, jeśli nie - zapisz
+            existing = Registryconf.load_argon_conf(level)
+            if existing == Registryconf.DEFAULT_ARGON_PARAMS.get(level):
+                Registryconf.save_argon_conf(level, params)
                 
     def change_language(self, language_code):
       """Change application language without restart"""
@@ -552,8 +548,6 @@ class SafePadApp:
           self.connect_signals()
         
           self.gui.update_status(f"Język zmieniony na {lang_manager.get_language_name()}")
-
-    
     
     # ------------------------- Operacje na plikach -------------------------
     
@@ -773,8 +767,13 @@ class SafePadApp:
     
     def _cancel_crypto(self):
         if self.crypto_worker and self.crypto_worker.isRunning():
-            output_path = getattr(self.crypto_worker, 'output_path', None) or \
-                          getattr(self.crypto_worker, 'output_folder', None)
+            # HOTFIX: tylko plik wyjściowy (.enc z szyfrowania folderu) jest
+            # bezpieczny do usunięcia tutaj - jest on tworzony/nadpisywany
+            # przez ten proces od samego początku operacji.
+            # wcześniej folder użytkownika (gdy wybrał "nadpisz"), albo
+            # folder który jeszcze nie istnieje - w obu przypadkach usuwanie
+            # go tutaj było błędem niszczącym prawdziwe dane użytkownika.
+            output_path = getattr(self.crypto_worker, 'output_path', None)
 
             # Proś wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
             # (między chunkami) zamiast wymuszać terminate(), które może
@@ -785,14 +784,9 @@ class SafePadApp:
             self.crypto_worker.wait()
             self.progress.close()
             
-            # Terminating mid-write can leave a partial/corrupt output file
-            # or folder behind - clean it up so it isn't mistaken for a
-            # valid (but undecryptable) result.
             try:
                 if output_path and os.path.isfile(output_path):
                     secure_delete(output_path)
-                elif output_path and os.path.isdir(output_path):
-                    shutil.rmtree(output_path, ignore_errors=True)
             except Exception:
                 pass
             
@@ -812,7 +806,6 @@ class SafePadApp:
       self.progress.close()
       self.gui.update_status("Błąd", is_error=True)
     
-      # Wyświetl bardziej przyjazny komunikat dla błędów hasła
       if "nieprawidłowe hasło" in error_msg.lower() or "invalid password" in error_msg.lower():
           QMessageBox.critical(
               self.gui, 
@@ -820,14 +813,11 @@ class SafePadApp:
               "Nieprawidłowe hasło!\n\n"
               "Sprawdź czy wprowadzone hasło jest poprawne.\n"
               "Hasła rozróżniają wielkość liter."
-          )
+        )
       else:
           QMessageBox.critical(self.gui, "Błąd", error_msg)
     
     # ------------------------- Sesja -------------------------
-    
-    
-    
     
     @staticmethod
     def _generate_backup_password():
@@ -835,56 +825,107 @@ class SafePadApp:
         return secrets.token_urlsafe(32)
     
     def load_backup_password(self):
-        """Wczytaj hasło do backupów sesji (przechowywane w systemowym
-        keyringu - patrz Registryconf.save_backup_password).
+        """Wczytaj hasło do backupów sesji z rejestru (chronione Windows DPAPI).
         
         Jeśli żadne hasło nie zostało jeszcze zapisane (pierwsze uruchomienie),
-        generujemy nowe, losowe hasło unikalne dla tej instalacji zamiast
-        polegać na jednym haśle domyślnym wspólnym dla wszystkich instalacji
-        programu (jak to było wcześniej, jako publiczna stała w kodzie
-        źródłowym)."""
-        stored_password = Registryconf.load_backup_password()
+        lub nie da się go odszyfrować (np. inny użytkownik/komputer), generujemy
+        nowe, losowe hasło unikalne dla tej instalacji zamiast polegać na
+        jednym haśle domyślnym wspólnym dla wszystkich instalacji programu."""
+        try:
+            stored_password = Registryconf.load_backup_password()
+        except Exception:
+            stored_password = None
+        
         if stored_password:
             self.backup_password = stored_password
         else:
             self.backup_password = self._generate_backup_password()
             Registryconf.save_backup_password(self.backup_password)
     
-    def get_backup_password(self):
-        """Pobierz aktualne hasło do backupów"""
-        if not self.backup_password:
-            self.load_backup_password()
-        return self.backup_password
+    def set_backup_password(self):
+        """Ustaw własne hasło do backupów sesji"""
+        # Zapytaj o nowe hasło
+        new_password, ok = QInputDialog.getText(
+            self.gui, 
+            "Hasło do backupów sesji", 
+            "Wprowadź nowe hasło do backupów sesji\n(lub pozostaw puste, aby wygenerować nowe losowe hasło):", 
+            QLineEdit.EchoMode.Password
+        )
+        
+        if not ok:
+            return False
+        
+        if not new_password:
+            # Wygeneruj nowe, losowe hasło (nigdy nie przywracamy jednego,
+            # wspólnego dla wszystkich instalacji hasła domyślnego).
+            self.backup_password = self._generate_backup_password()
+            Registryconf.save_backup_password(self.backup_password)
+            
+            QMessageBox.information(
+                self.gui, 
+                "Hasło zresetowane", 
+                "Wygenerowano nowe, losowe hasło do backupów sesji."
+            )
+            return True
+        
+        confirm_password, ok = QInputDialog.getText(
+            self.gui, 
+            "Potwierdź hasło", 
+            "Powtórz hasło do backupów sesji:", 
+            QLineEdit.EchoMode.Password
+        )
+        
+        if not ok:
+            return False
+        
+        if new_password != confirm_password:
+            QMessageBox.critical(
+                self.gui, 
+                "Błąd", 
+                "Hasła nie są identyczne!"
+            )
+            return False
+        
+        # Zapisz nowe hasło
+        self.backup_password = new_password
+        Registryconf.save_backup_password(new_password)
+        
+        QMessageBox.information(
+            self.gui, 
+            "Hasło zapisane", 
+            "Własne hasło do backupów sesji zostało zapisane.\n"
+            "Będzie używane przy następnym uruchomieniu programu."
+        )
+        
+        return True
     
     def save_to_temp_file(self):
-        """Zapisz sesję do pliku tymczasowego z użyciem własnego hasła"""
+        """Zapisz sesję do pliku tymczasowego"""
         try:
-            temp_file = _session_backup_path()
+            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             text = self.gui.text_edit.toPlainText()
             if text:
-                # Użyj własnego hasła do backupów
-                backup_pwd = self.get_backup_password()
-                encrypted = self.crypto.encrypt_data(backup_pwd, text.encode('utf-8'))
+                encrypted = self.crypto.encrypt_data(
+                    self.backup_password, 
+                    text.encode('utf-8')
+                )
                 with open(temp_file, 'wb') as f:
                     f.write(encrypted)
-                try:
-                    os.chmod(temp_file, 0o600)
-                except OSError:
-                    pass
         except Exception as e:
             print(f"Błąd zapisu sesji: {e}")
     
     def load_from_temp_file(self):
-        """Wczytaj sesję z pliku tymczasowego z użyciem własnego hasła"""
+        """Wczytaj sesję z pliku tymczasowego"""
         try:
-            temp_file = _session_backup_path()
+            temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             if os.path.exists(temp_file):
                 with open(temp_file, 'rb') as f:
                     encrypted = f.read()
                 
-                # Użyj własnego hasła do backupów
-                backup_pwd = self.get_backup_password()
-                decrypted = self.crypto.decrypt_data(backup_pwd, encrypted)
+                decrypted = self.crypto.decrypt_data(
+                    self.backup_password, 
+                    encrypted
+                )
                 self.gui.text_edit.setPlainText(decrypted.decode('utf-8'))
                 self.gui.update_status("Sesja przywrócona")
         except Exception as e:
@@ -893,27 +934,27 @@ class SafePadApp:
     # ------------------------- Ustawienia -------------------------
     
     def open_settings(self):
-        """Otwórz okno ustawień"""
-        from gui.ui import SettingsDialog
-        dialog = SettingsDialog(self.gui, self.settings)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_settings = dialog.get_settings()
-            
-            # Zapisz ustawienia do pliku konfiguracyjnego
-            Registryconf.save_settings(new_settings)
-            
-            # Aktualizuj lokalne ustawienia
-            self.settings = new_settings
-            
-            # Jeśli hasło do backupów zostało zmienione, przeładuj je
-            if new_settings.get("backup_password_changed"):
-                self.load_backup_password()
-            
-            # Aktualizuj szyfrowanie z nowym poziomem
-            level = new_settings.get("encryption_level", "medium")
-            self.crypto = EncryptionCEO(level)
-            
-            self.gui.update_status("Ustawienia zapisane")
+      """Otwórz okno ustawień"""
+      from gui.ui import SettingsDialog
+      dialog = SettingsDialog(self.gui, self.settings)
+      if dialog.exec() == QDialog.DialogCode.Accepted:
+        new_settings = dialog.get_settings()
+        
+        # Zapisz ustawienia do REJESTRU
+        Registryconf.save_settings(new_settings)
+        
+        # Aktualizuj lokalne ustawienia
+        self.settings = new_settings
+        
+        # Aktualizuj szyfrowanie z nowym poziomem
+        level = new_settings.get("encryption_level", "medium")
+        self.crypto = EncryptionCEO(level)
+        
+        # Jeśli hasło do backupów zostało zmienione, przeładuj je
+        if new_settings.get("backup_password_changed"):
+            self.load_backup_password()
+        
+        self.gui.update_status("Ustawienia zapisane w rejestrze")
     
     def show_about(self):
         about_text = f"""SafePad {APP_VERSION}
@@ -959,7 +1000,6 @@ Kod programu jest otwarty. Możesz swobodnie z niego korzystać, audytować pod 
             self.save_to_temp_file()
         QApplication.quit()
         
-
 
 def main():
     app = QApplication(sys.argv)
