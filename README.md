@@ -43,11 +43,11 @@
 ## Instalacja i Uruchomienie 
 
 ### Uruchamianie (Windows)
-1.Pobierz SafePad-2.1.0_Windows.exe z:
+1.Pobierz SafePad-2.2.2_Windows.exe z:
 
-[Wersja Stabilna V2.1.0](https://github.com/Bleee411/SafePad/releases/tag/Stable)
+[Wersja Stabilna V2.2.2](https://github.com/Bleee411/SafePad/releases/tag/V2.2.2)
 
-2.Otwórz SafePad-2.1.0_Windows.exe i gotowe
+2.Otwórz SafePad-2.2.2_Windows.exe i gotowe
 
 ### Uruchamianie z kodu żródłowego
 
@@ -67,22 +67,28 @@
 
 3.  Uruchom aplikację:
     ```bash
-    python SafePad.py
+    python main.py
     ```
 
-### Uruchamianie skompilowanej wersji (Linux)
-
-Po pobraniu skompilowanej wersji z sekcji "Releases":
-
-1.  Nadaj plikowi uprawnienia do uruchomienia i pobierz libnotify-bin:
+### Kompilowanie wersji z kodu żródłowego
+1.  Sklonuj repozytorium:
     ```bash
+    git clone https://github.com/Bleee411/SafePad.git
+    cd SafePad
+    ```
+    
+    2.  Zainstaluj zależności:
+    ```bash
+    pip install -r requirements.txt
+    ```
+   (Linux)
+   ```bash
     sudo apt install libnotify-bin
-    chmod +x SafePad
-    ```
-2.  Uruchom aplikację:
-    ```bash
-    ./SafePad
-    ```
+   ```
+3.
+```bash
+   pyinstaller --onefile --name="nazwa_pliku_exe" icon="ścieżka_do_ikony" --windowed main.py
+```
     
 ## Screenshots
 
