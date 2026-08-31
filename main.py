@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.2h
+Wersja: 2.2.3-BETA
 """
 
 import sys
@@ -28,7 +28,7 @@ from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, c
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
-APP_VERSION = "2.2.2h"
+APP_VERSION = "2.2.3-BETA"
 AUTHOR = "Szofer"
 
 # NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca

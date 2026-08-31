@@ -20,8 +20,22 @@ def secure_delete(file_path, passes=3, chunk_size=16 * 1024 * 1024):
     
     Nadpisywanie odbywa się w kawałkach (chunk_size), a nie jednym
     `os.urandom(file_size)` na cały plik naraz - dzięki temu duże pliki
-    (np. wieloGB zaszyfrowane archiwa folderów) nie powodują skoku zużycia
+    (np. wielo GB zaszyfrowane archiwa folderów) nie powodują skoku zużycia
     pamięci RAM proporcjonalnego do rozmiaru pliku.
+
+    UWAGA (ograniczenie techniczne, nie błąd w kodzie):
+    Ta metoda nadpisywania jest wiarygodna na klasycznych dyskach HDD, ale
+    NIE gwarantuje trwałego usunięcia danych na dyskach SSD/NVMe. Z powodu
+    wear-levelingu i remapowania bloków przez kontroler SSD, fizyczne
+    komórki pamięci przechowujące oryginalne dane często nie są tymi
+    samymi, które zostają nadpisane - stare dane mogą pozostać odczytywalne
+    w "martwych" blokach do czasu ich wyczyszczenia przez TRIM/garbage
+    collection dysku. Na SSD jedynym w pełni pewnym sposobem trwałego
+    usunięcia pojedynczego pliku jest pełne szyfrowanie dysku (np. BitLocker)
+    od samego początku, albo bezpieczne kasowanie całego nośnika (ATA
+    Secure Erase). Warto to jasno zakomunikować użytkownikom, którzy polegają
+    na tej funkcji przy pracy z wrażliwymi danymi.
+    
     
     Args:
         file_path: Ścieżka do pliku do usunięcia
