@@ -144,6 +144,11 @@ class Registryconf:
             # Zapisz ustawienia wyglądu
             winreg.SetValueEx(key, "dark_mode", 0, winreg.REG_DWORD, 1 if settings.get("dark_mode", True) else 0)
             winreg.SetValueEx(key, "notifications", 0, winreg.REG_DWORD, 1 if settings.get("notifications", True) else 0)
+
+            # HOTFIX: brakujący zapis minimize_to_tray - był odczytywany w
+            # load_settings(), ale nigdy nie zapisywany, przez co ustawienie
+            # nie przetrwało restartu aplikacji.
+            winreg.SetValueEx(key, "minimize_to_tray", 0, winreg.REG_DWORD, 1 if settings.get("minimize_to_tray", False) else 0)
             
             
             winreg.CloseKey(key)
@@ -164,6 +169,7 @@ class Registryconf:
             "password_require_special": False,
             "dark_mode": True,
             "notifications": True,
+            "minimize_to_tray": False,
         }
         
         try:
@@ -324,7 +330,19 @@ class EncryptionCEO:
             raise
     
     def generate_serpent_key(self, password, salt):
-        """Generuje osobny klucz dla Serpent (256 bit)"""
+        """
+        Generuje osobny klucz dla Serpent (256 bit).
+
+        UWAGA: `salt` przekazywany tutaj (serpent_salt) jest już od początku
+        generowany niezależnym wywołaniem os.urandom(), oddzielnym od
+        aes_salt użytego w generate_key(). Poniższe XOR z 0xAA nie dodaje
+        więc żadnej realnej separacji kryptograficznej ponad to, co daje
+        sama niezależna losowość salta - jest nieszkodliwe, ale zbędne.
+        CELOWO NIE usuwamy/zmieniamy tej transformacji: zmiana sposobu
+        wyprowadzania klucza złamałaby kompatybilność wsteczną i
+        uniemożliwiła odszyfrowanie plików zaszyfrowanych wcześniejszymi
+        wersjami aplikacji.
+        """
         try:
             different_salt = bytes([b ^ 0xAA for b in salt])
             key = argon2.low_level.hash_secret_raw(

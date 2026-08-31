@@ -1,4 +1,3 @@
-
 # SafePad 🔒
 
 --------------
@@ -8,8 +7,18 @@
 ![Platform](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
 ![Windows](https://img.shields.io/badge/Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)
 ![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=for-the-badge)
+![Release](https://img.shields.io/badge/Bieżące_wydanie-Beta-orange?style=for-the-badge)
 
 --------------
+
+> ⚠️ **Bieżące wydanie jest wersją BETA.**
+> SafePad jako projekt jest rozwijany aktywnie i stabilnie, natomiast obecny
+> numer wydania to build beta — może zawierać błędy, w tym teoretycznie takie,
+> które mogłyby prowadzić do utraty danych (np. przy operacjach na
+> zaszyfrowanych folderach). **Zawsze trzymaj kopię zapasową** ważnych plików
+> przed ich zaszyfrowaniem lub odszyfrowaniem tym narzędziem. Zgłoszenia
+> błędów i feedback są bardzo mile widziane — pomagają uczynić kolejne
+> wydania stabilniejszymi.
 
 **SafePad** to bezpieczny, szyfrowany edytor tekstu napisany w Pythonie przy użyciu biblioteki PyQt6. Aplikacja przechowuje Twoje notatki w zaszyfrowanym formacie, używając nowoczesnych algorytmów kryptograficznych, aby zapewnić ich prywatność.
 
@@ -37,63 +46,16 @@
 - 🪟 Windows — pełne wsparcie  
 - 🐧 Linux — Pełne wsparcie na Debianie 13 (Testowane na Debianie 13)  
 
+## 🚧 Status projektu
 
+SafePad znajduje się obecnie w fazie **beta**. Oznacza to:
 
+* Podstawowe funkcje (szyfrowanie/deszyfrowanie plików i folderów, edycja notatek) działają i są testowane, ale nie przeszły jeszcze pełnego, długoterminowego audytu w warunkach produkcyjnych.
+* Format zapisu plików oraz sposób wyprowadzania kluczy mogą jeszcze ulec zmianom między wydaniami beta (staramy się zachowywać kompatybilność wsteczną, ale nie jest to gwarantowane na tym etapie).
+* Błędy są aktywnie zgłaszane i naprawiane — zalecane jest korzystanie z najnowszej dostępnej wersji.
+* Stabilne wydanie 1.0 pojawi się po zakończeniu szerszych testów.
 
-## Instalacja i Uruchomienie 
-
-### Uruchamianie (Windows)
-1.Pobierz SafePad-2.2.2_Windows.exe z:
-
-[Wersja Stabilna V2.2.2](https://github.com/Bleee411/SafePad/releases/tag/V2.2.2)
-
-2.Otwórz SafePad-2.2.2_Windows.exe i gotowe
-
-### Uruchamianie z kodu żródłowego
-
-1.  Sklonuj repozytorium:
-    ```bash
-    git clone https://github.com/Bleee411/SafePad.git
-    cd SafePad
-    ```
-
-2.  Zainstaluj zależności:
-    ```bash
-    pip install -r requirements.txt
-    ```
-    ```bash
-    sudo apt install libnotify-bin
-    ```
-
-3.  Uruchom aplikację:
-    ```bash
-    python main.py
-    ```
-
-### Kompilowanie wersji z kodu żródłowego
-1.  Sklonuj repozytorium:
-    ```bash
-    git clone https://github.com/Bleee411/SafePad.git
-    cd SafePad
-    ```
-    
-    2.  Zainstaluj zależności:
-    ```bash
-    pip install -r requirements.txt
-    ```
-   (Linux)
-   ```bash
-    sudo apt install libnotify-bin
-   ```
-3.
-```bash
-   pyinstaller --onefile --name="nazwa_pliku_exe" icon="ścieżka_do_ikony" --windowed main.py
-```
-    
-## Screenshots
-
-![Ekran główny](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124341.png)
-![Ustawienia](https://github.com/Bleee411/SafePad/blob/main/Screenshots/Zrzut%20ekranu%202025-11-10%20124355.png)
+Jeśli znajdziesz błąd lub coś nie działa zgodnie z oczekiwaniami, otwórz proszę **Issue** w repozytorium.
 
 ## Licencja
 
@@ -105,7 +67,8 @@ Ten projekt jest udostępniany na licencji [MIT](https://choosealicense.com/lice
 > Ten projekt SafePad (autorstwa szofer) jest niezależnym notatnikiem szyfrującym  
 > napisanym w Pythonie na licencji MIT.  
 > Nie jest powiązany z żadnym innym projektem o tej samej nazwie.
-
-
-
-
+>
+> To oprogramowanie jest dostarczane w fazie **beta**, "tak jak jest" (as-is),
+> bez żadnych gwarancji. Autor nie ponosi odpowiedzialności za utratę danych
+> wynikającą z korzystania z tej aplikacji. Używaj na własną odpowiedzialność
+> i zawsze zachowuj kopie zapasowe ważnych plików.

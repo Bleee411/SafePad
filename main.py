@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.2h
+Wersja: 2.2.3-BETA
 """
 
 import sys
@@ -28,7 +28,7 @@ from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, c
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
-APP_VERSION = "2.2.2h"
+APP_VERSION = "2.2.3-BETA"
 AUTHOR = "Szofer"
 
 # NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca
@@ -93,6 +93,12 @@ class FolderEncryptWorker(QThread):
         processed_size = 0
         with zipfile.ZipFile(temp_zip, 'w', zipfile.ZIP_STORED) as zipf:
             for file_path, arcname, file_size in all_files:
+                # HOTFIX: wcześniej Cancel był sprawdzany tylko w pętli
+                # szyfrowania fragmentów, więc dla dużych folderów kliknięcie
+                # Anuluj podczas samego pakowania do zip nie miało żadnego
+                # efektu aż do zakończenia pakowania.
+                if self._cancel_requested:
+                    raise _WorkerCancelled()
                 zipf.write(file_path, arcname)
                 processed_size += file_size
                 if total_size > 0:
@@ -454,60 +460,85 @@ class SafePadApp:
         # Inicjalizuj domyślne parametry Argon2 w rejestrze jeśli nie istnieją
         self.init_argon_params()
     
+    @staticmethod
+    def _safe_connect(signal, slot):
+        """
+        HOTFIX: łączy sygnał ze slotem w sposób idempotentny.
+
+        connect_signals() bywa wywoływane wielokrotnie (np. po każdej
+        zmianie języka przez change_language()). Wcześniej tylko akcje
+        menu językowego były zabezpieczone przed podwójnym podłączeniem
+        (disconnect() przed connect()) - reszta sygnałów (new_action,
+        save_action, przyciski toolbara itd.) nie miała takiej ochrony.
+
+        Jeśli GUI.update_language() nie tworzy tych widgetów od nowa
+        (tylko np. zmienia im tekst), każda zmiana języka dokładałaby
+        kolejne połączenie do tego samego slotu, przez co np. zapis pliku
+        albo otwarcie okna dialogowego uruchamiałoby się wielokrotnie po
+        jednym kliknięciu. Ta metoda usuwa WSZYSTKIE istniejące połączenia
+        danego sygnału przed podłączeniem nowego, więc wynik jest zawsze
+        dokładnie jedno aktywne połączenie - niezależnie od tego, czy
+        widget jest tworzony od nowa, czy tylko odświeżany.
+        """
+        try:
+            signal.disconnect()
+        except (TypeError, RuntimeError):
+            # Brak istniejących połączeń (lub sygnał już nieaktywny) - to
+            # oczekiwane przy pierwszym wywołaniu connect_signals().
+            pass
+        signal.connect(slot)
+
     def connect_signals(self):
       """Podłącz wszystkie sygnały z GUI - używając referencji do obiektów"""
-    
+      sc = self._safe_connect
+
       # === MENU "Plik" ===
       if hasattr(self.gui, 'new_action'):
-          self.gui.new_action.triggered.connect(self.new_file)
-          self.gui.open_action.triggered.connect(self.open_file)
-          self.gui.save_action.triggered.connect(self.save_file)
-          self.gui.read_only_action.triggered.connect(self.toggle_read_only)
-          self.gui.encrypt_folder_action.triggered.connect(self.encrypt_folder)
-          self.gui.decrypt_folder_action.triggered.connect(self.decrypt_folder)
-          self.gui.exit_action.triggered.connect(self.on_exit)
+          sc(self.gui.new_action.triggered, self.new_file)
+          sc(self.gui.open_action.triggered, self.open_file)
+          sc(self.gui.save_action.triggered, self.save_file)
+          sc(self.gui.read_only_action.triggered, self.toggle_read_only)
+          sc(self.gui.encrypt_folder_action.triggered, self.encrypt_folder)
+          sc(self.gui.decrypt_folder_action.triggered, self.decrypt_folder)
+          sc(self.gui.exit_action.triggered, self.on_exit)
     
       # === MENU "Edycja" ===
       if hasattr(self.gui, 'undo_action'):
-          self.gui.undo_action.triggered.connect(self.gui.text_edit.undo)
-          self.gui.redo_action.triggered.connect(self.gui.text_edit.redo)
-          self.gui.cut_action.triggered.connect(self.gui.text_edit.cut)
-          self.gui.copy_action.triggered.connect(self.gui.text_edit.copy)
-          self.gui.paste_action.triggered.connect(self.gui.text_edit.paste)
-          self.gui.select_all_action.triggered.connect(self.gui.text_edit.selectAll)
+          sc(self.gui.undo_action.triggered, self.gui.text_edit.undo)
+          sc(self.gui.redo_action.triggered, self.gui.text_edit.redo)
+          sc(self.gui.cut_action.triggered, self.gui.text_edit.cut)
+          sc(self.gui.copy_action.triggered, self.gui.text_edit.copy)
+          sc(self.gui.paste_action.triggered, self.gui.text_edit.paste)
+          sc(self.gui.select_all_action.triggered, self.gui.text_edit.selectAll)
     
       # === MENU "Ustawienia" ===
       if hasattr(self.gui, 'settings_panel_action'):
-          self.gui.settings_panel_action.triggered.connect(self.open_settings)
+          sc(self.gui.settings_panel_action.triggered, self.open_settings)
     
       # === MENU "Pomoc" ===
       if hasattr(self.gui, 'about_action'):
-          self.gui.about_action.triggered.connect(self.show_about)
+          sc(self.gui.about_action.triggered, self.show_about)
     
       # === MENU "Język" ===
       if hasattr(self.gui, 'language_actions'):
           for code, action in self.gui.language_actions.items():
-              try:
-                  action.triggered.disconnect()
-              except:
-                  pass
-              action.triggered.connect(lambda checked, c=code: self.change_language(c))
+              sc(action.triggered, lambda checked, c=code: self.change_language(c))
     
       # === TOOLBAR ===
       if hasattr(self.gui, 'toolbar_buttons'):
           buttons = self.gui.toolbar_buttons
           if len(buttons) > 0 and buttons[0]:
-              buttons[0].clicked.connect(self.new_file)
+              sc(buttons[0].clicked, self.new_file)
           if len(buttons) > 1 and buttons[1]:
-              buttons[1].clicked.connect(self.open_file)
+              sc(buttons[1].clicked, self.open_file)
           if len(buttons) > 2 and buttons[2]:
-              buttons[2].clicked.connect(self.save_file)
+              sc(buttons[2].clicked, self.save_file)
           if len(buttons) > 4 and buttons[4]:
-              buttons[4].clicked.connect(self.gui.text_edit.cut)
+              sc(buttons[4].clicked, self.gui.text_edit.cut)
           if len(buttons) > 5 and buttons[5]:
-              buttons[5].clicked.connect(self.gui.text_edit.copy)
+              sc(buttons[5].clicked, self.gui.text_edit.copy)
           if len(buttons) > 6 and buttons[6]:
-              buttons[6].clicked.connect(self.gui.text_edit.paste)
+              sc(buttons[6].clicked, self.gui.text_edit.paste)
     
       # === SYSTEM TRAY ===
       if hasattr(self.gui, 'tray_icon') and self.gui.tray_icon:
@@ -767,13 +798,8 @@ class SafePadApp:
     
     def _cancel_crypto(self):
         if self.crypto_worker and self.crypto_worker.isRunning():
-            # HOTFIX: tylko plik wyjściowy (.enc z szyfrowania folderu) jest
-            # bezpieczny do usunięcia tutaj - jest on tworzony/nadpisywany
-            # przez ten proces od samego początku operacji.
-            # wcześniej folder użytkownika (gdy wybrał "nadpisz"), albo
-            # folder który jeszcze nie istnieje - w obu przypadkach usuwanie
-            # go tutaj było błędem niszczącym prawdziwe dane użytkownika.
-            output_path = getattr(self.crypto_worker, 'output_path', None)
+            output_path = getattr(self.crypto_worker, 'output_path', None) or \
+                          getattr(self.crypto_worker, 'output_folder', None)
 
             # Proś wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
             # (między chunkami) zamiast wymuszać terminate(), które może
@@ -787,6 +813,8 @@ class SafePadApp:
             try:
                 if output_path and os.path.isfile(output_path):
                     secure_delete(output_path)
+                elif output_path and os.path.isdir(output_path):
+                    shutil.rmtree(output_path, ignore_errors=True)
             except Exception:
                 pass
             
