@@ -199,6 +199,13 @@ def clear_temp_files(keep_last=5):
 
 # ------------------------- BENCHMARK ARGON2ID -------------------------
 
+class _BenchmarkCancelled(Exception):
+    """Sygnalizuje, że użytkownik poprosił o anulowanie benchmarku Argon2ID
+    (współpracujące przerwanie, sprawdzane między kolejnymi wywołaniami
+    Argon2 - patrz Argon2Benchmark.run_benchmark)."""
+    pass
+
+
 class Argon2Benchmark:
     """
     Benchmark dla Argon2ID - dostosowuje parametry do możliwości komputera.
@@ -212,21 +219,32 @@ class Argon2Benchmark:
     MAX_PARALLELISM = multiprocessing.cpu_count()  # Maksymalna liczba wątków
     
     @classmethod
-    def run_benchmark(cls, progress_callback=None, status_callback=None):
+    def run_benchmark(cls, progress_callback=None, status_callback=None, cancel_check=None):
         """
         Uruchamia benchmark Argon2ID i zwraca optymalne parametry.
         
         Args:
             progress_callback: Funkcja callback dla postępu (0-100)
             status_callback: Funkcja callback dla statusu tekstowego
-        
-        Returns:
-            dict: Optymalne parametry {"m": memory, "t": time, "p": parallelism}
+            cancel_check: Opcjonalna funkcja zwracająca True, jeśli benchmark
+                powinien zostać przerwany. Sprawdzana między kolejnymi
+                wywołaniami Argon2 (samo wywołanie hash_secret_raw jest
+                blokującym wywołaniem C i nie można go przerwać w połowie),
+                ale to wciąż dużo bezpieczniejsze niż QThread.terminate(),
+                które może zabić wątek w trakcie trzymania dużego bufora
+                pamięci Argon2 i zostawić proces w niespójnym stanie.
+
+        Raises:
+            _BenchmarkCancelled: jeśli cancel_check zwróciło True.
         """
         try:
             import argon2
         except ImportError:
             raise ImportError("Biblioteka 'argon2-cffi' nie jest zainstalowana. Uruchom: pip install argon2-cffi")
+
+        def _check_cancel():
+            if cancel_check is not None and cancel_check():
+                raise _BenchmarkCancelled()
         
         # Testowe dane
         password = b"benchmark-test-password-2024"
@@ -248,6 +266,7 @@ class Argon2Benchmark:
         memory_levels = [16, 32, 64, 128, 256, 512, 768, 1024, 2048, 4096]
         
         for mem_mb in memory_levels:
+            _check_cancel()
             if status_callback:
                 status_callback(f"Testowanie {mem_mb} MB pamięci...")
             
@@ -295,6 +314,7 @@ class Argon2Benchmark:
         
         # Testuj iteracje od 1 do 20
         for t in range(1, cls.MAX_TIME_COST + 1):
+            _check_cancel()
             if status_callback:
                 status_callback(f"Testowanie {t} iteracji...")
             
@@ -338,6 +358,7 @@ class Argon2Benchmark:
         
         # Testuj od 1 do max_parallelism
         for p in range(1, max_parallelism + 1):
+            _check_cancel()
             if status_callback:
                 status_callback(f"Testowanie {p} wątków...")
             
@@ -395,20 +416,19 @@ class Argon2Benchmark:
         t = benchmark_results["t"]
         p = benchmark_results["p"]
         
-        # Poziomy bezpieczeństwa
         return {
             "low": {
-                "m": max(16 * 4096, mem // 4),      # 1/4 pamięci benchmarku
+                "m": max(16 * 1024, mem // 4),      # 1/4 pamięci benchmarku
                 "t": max(1, t // 2),                # 1/2 iteracji
                 "p": max(1, p // 2)                 # 1/2 wątków
             },
             "medium": {
                 "m": mem,                           # Jak w benchmarku
-                "t": t,                             # Jak w benchmarku
+                "t": t,                              # Jak w benchmarku
                 "p": p                              # Jak w benchmarku
             },
             "high": {
-                "m": min(cls.MAX_MEMORY_MB * 4096, mem * 2),  # 2x pamięci (max 4GB)
+                "m": min(cls.MAX_MEMORY_MB * 1024, mem * 2),  # 2x pamięci (max MAX_MEMORY_MB)
                 "t": min(cls.MAX_TIME_COST, t * 2),            # 2x iteracji
                 "p": min(cls.MAX_PARALLELISM, p * 2)           # 2x wątków
             }

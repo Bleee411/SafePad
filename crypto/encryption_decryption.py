@@ -23,17 +23,41 @@ class _DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
 
 
-def _to_blob(data: bytes) -> _DATA_BLOB:
+def _to_blob(data: bytes):
+    """Tworzy _DATA_BLOB wskazujący na dane.
+
+    HOTFIX: wcześniej bufor (`ctypes.create_string_buffer`) był zmienną
+    lokalną i nie miał żadnej referencji po powrocie z tej funkcji - CPython
+    mógł go zwolnić (garbage collector) zanim CryptProtectData/CryptUnprotectData
+    zdążyło odczytać wskazywaną pamięć, co dawało losowe awaria/uszkodzone dane.
+    Zwracamy teraz PARĘ (blob, buf) i wołający MUSI utrzymać `buf` żywy przez
+    cały czas trwania wywołania Win32 (patrz użycie poniżej)."""
     buf = ctypes.create_string_buffer(data, len(data))
-    return _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    return blob, buf
+
+
+def _configure_dpapi_signatures(crypt32, kernel32):
+    """Ustawia argtypes/restype dla funkcji Win32, żeby ctypes nie obcinał
+    wskaźników na platformach 64-bitowych (domyślnie ctypes zakłada int)."""
+    crypt32.CryptProtectData.argtypes = [
+        ctypes.POINTER(_DATA_BLOB), wintypes.LPCWSTR, ctypes.POINTER(_DATA_BLOB),
+        ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(_DATA_BLOB)
+    ]
+    crypt32.CryptProtectData.restype = wintypes.BOOL
+    crypt32.CryptUnprotectData.argtypes = crypt32.CryptProtectData.argtypes
+    crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
 
 
 def dpapi_protect(data: bytes) -> bytes:
     """Szyfruje dane za pomocą Windows DPAPI (powiązane z bieżącym użytkownikiem)."""
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
+    _configure_dpapi_signatures(crypt32, kernel32)
 
-    in_blob = _to_blob(data)
+    in_blob, _in_buf = _to_blob(data)  # _in_buf musi żyć do końca wywołania poniżej
     out_blob = _DATA_BLOB()
 
     ok = crypt32.CryptProtectData(
@@ -54,8 +78,9 @@ def dpapi_unprotect(data: bytes) -> bytes:
     """Odszyfrowuje dane zapisane przez dpapi_protect()."""
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
+    _configure_dpapi_signatures(crypt32, kernel32)
 
-    in_blob = _to_blob(data)
+    in_blob, _in_buf = _to_blob(data)  # _in_buf musi żyć do końca wywołania poniżej
     out_blob = _DATA_BLOB()
 
     ok = crypt32.CryptUnprotectData(
@@ -262,18 +287,27 @@ class Registryconf:
     def load_backup_password():
         try:
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, Registryconf.REG_PATH, 0, winreg.KEY_READ)
-            try:
-                encoded_password, _ = winreg.QueryValueEx(key, "BackupPassword")
-                protected = base64.b64decode(encoded_password)
-                password = dpapi_unprotect(protected).decode('utf-8')
-                winreg.CloseKey(key)
-                return password
-            except FileNotFoundError:
-                winreg.CloseKey(key)
-                return None
         except Exception as e:
             print(f"Nie można wczytać hasła do backupów: {e}")
             return None
+
+        # HOTFIX: klucz rejestru był zamykany tylko w gałęzi FileNotFoundError -
+        # jeśli QueryValueEx/base64/DPAPI zgłosiły inny wyjątek (np. uszkodzone
+        # dane, błąd DPAPI po zmianie użytkownika), uchwyt rejestru zostawał
+        # otwarty do końca życia procesu. Teraz zamykamy go w finally,
+        # niezależnie od tego, co się stanie.
+        try:
+            try:
+                encoded_password, _ = winreg.QueryValueEx(key, "BackupPassword")
+            except FileNotFoundError:
+                return None
+            protected = base64.b64decode(encoded_password)
+            return dpapi_unprotect(protected).decode('utf-8')
+        except Exception as e:
+            print(f"Nie można wczytać hasła do backupów: {e}")
+            return None
+        finally:
+            winreg.CloseKey(key)
     
     @staticmethod
     def delete_backup_password():
@@ -519,9 +553,15 @@ class EncryptionCEO:
         # nieodróżnialnego komunikatu błędu dla obu etapów.
         generic_error = "Nieprawidłowe hasło lub uszkodzone dane"
 
-        # Krok 1: Odszyfrowanie Serpent-CBC
+
         try:
             serpent_key = self.generate_serpent_key(password, serpent_salt)
+            aes_key = self.generate_key(password, aes_salt)
+        except Exception:
+            raise ValueError(generic_error)
+
+        # Krok 1: Odszyfrowanie Serpent-CBC
+        try:
             # Deszyfruj Serpent (zwraca IV + padded AES data)
             decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
 
@@ -535,7 +575,6 @@ class EncryptionCEO:
 
         # Krok 2: Odszyfrowanie AES-GCM
         try:
-            aes_key = self.generate_key(password, aes_salt)
             aesgcm = AESGCM(aes_key)
             decrypted_data = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
         except Exception:

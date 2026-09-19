@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.3-BETA
+Wersja: 2.2.3-BETA-2
 """
 
 import sys
@@ -11,24 +11,22 @@ import secrets
 import tempfile
 import shutil
 import zipfile
-from PyQt6.QtCore import QThread, pyqtSignal, Qt
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QFileDialog, QInputDialog, 
-                             QProgressDialog, QLineEdit, QDialog, QPushButton)
+                             QProgressDialog, QLineEdit, QDialog)
 from PyQt6.QtGui import QIcon
 import ctypes
-from PyQt6.QtWidgets import QMenu
-from PyQt6.QtGui import QAction
 
-from others.languages import tr, format_tr, LanguageManager
+from others.languages import LanguageManager
 from gui.ui import SafePadGUI
 from crypto.encryption_decryption import EncryptionCEO, Registryconf
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
-from others.others import Argon2Benchmark, is_benchmark_needed, secure_delete, check_password_requirements
+from others.others import secure_delete, check_password_requirements
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
-APP_VERSION = "2.2.3-BETA"
+APP_VERSION = "2.2.3-BETA-2"
 AUTHOR = "Szofer"
 
 # NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca
@@ -112,7 +110,6 @@ class FolderEncryptWorker(QThread):
         if self.crypto.use_cascade:
             # ===== SZYFROWANIE KASKADOWE AES-GCM + SERPENT-CBC =====
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-            from pyserpent import serpent_cbc_encrypt
             
             # Generuj klucze i parametry dla AES
             aes_salt = os.urandom(self.crypto.SALT_SIZE)
@@ -291,8 +288,20 @@ class FolderDecryptWorker(QThread):
                     if self._cancel_requested:
                         raise _WorkerCancelled()
 
-                    chunk_len = int.from_bytes(f_in.read(4), 'big')
+                    chunk_len_bytes = f_in.read(4)
+                    if len(chunk_len_bytes) != 4:
+                        raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
+                    chunk_len = int.from_bytes(chunk_len_bytes, 'big')
+                    # HOTFIX: chunk_len pochodzi z pliku (może być uszkodzony
+                    # lub spreparowany) - walidujemy zakres i sprawdzamy, czy
+                    # rzeczywiście udało się wczytać zadeklarowaną liczbę
+                    # bajtów, zamiast bez ograniczeń próbować f_in.read()
+                    # na dowolnie dużą, potencjalnie fałszywą długość.
+                    if chunk_len < 0 or chunk_len > self.CHUNK_SIZE + 64:
+                        raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
                     encrypted_chunk = f_in.read(chunk_len)
+                    if len(encrypted_chunk) != chunk_len:
+                        raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
 
                     nonce = nonce_base + chunk_idx.to_bytes(4, 'big')
                     try:
@@ -304,7 +313,10 @@ class FolderDecryptWorker(QThread):
 
                     if num_chunks > 0:
                         self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-        except _WorkerCancelled:
+        except Exception:
+            # HOTFIX: wcześniej tylko _WorkerCancelled czyściło temp_dir - każdy
+            # inny błąd (złe hasło, uszkodzony plik) zostawiał częściowo
+            # odszyfrowany plaintext ZIP w %TEMP% na zawsze.
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
@@ -338,8 +350,17 @@ class FolderDecryptWorker(QThread):
                 if self._cancel_requested:
                     raise _WorkerCancelled()
 
-                chunk_len = int.from_bytes(f_in.read(4), 'big')
+                chunk_len_bytes = f_in.read(4)
+                if len(chunk_len_bytes) != 4:
+                    raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
+                chunk_len = int.from_bytes(chunk_len_bytes, 'big')
+                # HOTFIX: walidacja długości chunku pochodzącej z pliku - patrz
+                # analogiczny komentarz w _decrypt_aes powyżej.
+                if chunk_len < 0 or chunk_len > self.CHUNK_SIZE + 64:
+                    raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
                 serpent_encrypted = f_in.read(chunk_len)
+                if len(serpent_encrypted) != chunk_len:
+                    raise ValueError("Nieprawidłowe hasło lub uszkodzone dane")
                 
                 # UWAGA - ochrona przed atakiem typu padding oracle: oba etapy
                 # (Serpent-CBC/unpad oraz AES-GCM) muszą zgłaszać identyczny,
@@ -370,7 +391,9 @@ class FolderDecryptWorker(QThread):
                 
                 if num_chunks > 0:
                     self.progress.emit(10 + int((chunk_idx / num_chunks) * 40))
-        except _WorkerCancelled:
+        except Exception:
+            # HOTFIX: patrz komentarz w _decrypt_aes - czyścimy temp_dir na
+            # KAŻDYM błędzie, nie tylko na anulowaniu.
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
 
@@ -398,7 +421,8 @@ class FolderDecryptWorker(QThread):
                         raise ValueError("Wykryto niebezpieczną ścieżkę w archiwum")
                     
                     zipf.extract(name, staging_dir)
-                    self.progress.emit(50 + int(((i + 1) / len(files)) * 40))
+                    if files:
+                        self.progress.emit(50 + int(((i + 1) / len(files)) * 40))
             
             # Wypakowanie się powiodło - dopiero teraz można bezpiecznie
             # podmienić istniejący folder docelowy (jeśli istnieje).
@@ -447,6 +471,12 @@ class SafePadApp:
         
         # GUI
         self.gui = SafePadGUI()
+
+        # HOTFIX: self.gui.settings zostawało {} od __init__ SafePadGUI aż do
+        # pierwszego otwarcia okna Ustawień - closeEvent() (minimize_to_tray)
+        # i inne miejsca w GUI odwołujące się do ustawień nie miały do nich
+        # dostępu od startu aplikacji.
+        self.gui.settings = self.settings
         
         # Podłącz sygnały
         self.connect_signals()
@@ -459,7 +489,29 @@ class SafePadApp:
         
         # Inicjalizuj domyślne parametry Argon2 w rejestrze jeśli nie istnieją
         self.init_argon_params()
+
+        # HOTFIX: autozapis sesji działał wcześniej TYLKO przy wyjściu przez
+        # menu "Plik -> Zakończ" (on_exit wołało save_to_temp_file() raz).
+        # "O programie" obiecuje "w tle automatycznie tworzone są zaszyfrowane
+        # kopie zapasowe (snapshoty) aktualnej sesji" - dodajemy okresowy
+        # zapis, żeby to było prawdą, a nie tylko przy zamknięciu programu.
+        self.autosave_timer = QTimer()
+        self.autosave_timer.setInterval(60 * 1000)  # co 60 sekund
+        self.autosave_timer.timeout.connect(self.save_to_temp_file)
+        self.autosave_timer.start()
     
+    def _set_current_file(self, file_path):
+        """Ustawia aktualnie otwarty plik i synchronizuje go z GUI.
+
+        HOTFIX: self.current_file (na poziomie aplikacji) i self.gui.current_file
+        (czytane przez SafePadGUI.update_label()/update_language() do
+        wyświetlenia nazwy pliku) nigdy nie były synchronizowane - main.py
+        ustawiał tylko swoje self.current_file, więc etykieta pliku w oknie
+        zawsze pokazywała "brak pliku", niezależnie od tego, co faktycznie
+        było otwarte/zapisane."""
+        self.current_file = file_path
+        self.gui.current_file = file_path
+
     @staticmethod
     def _safe_connect(signal, slot):
         """
@@ -519,11 +571,6 @@ class SafePadApp:
       if hasattr(self.gui, 'about_action'):
           sc(self.gui.about_action.triggered, self.show_about)
     
-      # === MENU "Język" ===
-      if hasattr(self.gui, 'language_actions'):
-          for code, action in self.gui.language_actions.items():
-              sc(action.triggered, lambda checked, c=code: self.change_language(c))
-    
       # === TOOLBAR ===
       if hasattr(self.gui, 'toolbar_buttons'):
           buttons = self.gui.toolbar_buttons
@@ -541,8 +588,16 @@ class SafePadApp:
               sc(buttons[6].clicked, self.gui.text_edit.paste)
     
       # === SYSTEM TRAY ===
+      # HOTFIX: wcześniej to była pusta gałąź (`pass`) - kliknięcie "Pokaż"
+      # lub "Zakończ" w menu traya, czy dwuklik na ikonie traya, nie robiły
+      # absolutnie nic. ui.py teraz emituje realne sygnały Qt dla tych
+      # zdarzeń (patrz SafePadGUI.tray_show_requested/tray_exit_requested/
+      # close_requested) - podłączamy je tutaj do rzeczywistej logiki
+      # aplikacji.
       if hasattr(self.gui, 'tray_icon') and self.gui.tray_icon:
-          pass
+          sc(self.gui.tray_show_requested, self.show_normal)
+          sc(self.gui.tray_exit_requested, self.on_exit)
+          sc(self.gui.close_requested, self.on_exit)
     
     def init_argon_params(self):
         """Inicjalizuje domyślne parametry Argon2 w rejestrze"""
@@ -551,40 +606,38 @@ class SafePadApp:
             existing = Registryconf.load_argon_conf(level)
             if existing == Registryconf.DEFAULT_ARGON_PARAMS.get(level):
                 Registryconf.save_argon_conf(level, params)
-                
-    def change_language(self, language_code):
-      """Change application language without restart"""
-      from others.languages import LanguageManager
-    
-      lang_manager = LanguageManager()
-      current_lang = lang_manager.get_language()
-    
-      if language_code != current_lang:
-          lang_manager.save_language(language_code)
-        
-          # Zapisz bieżący tekst
-          current_text = self.gui.text_edit.toPlainText()
-          current_file = self.current_file
-        
-          # Odśwież całe GUI
-          self.gui.update_language()
-        
-          # Przywróć tekst
-          self.gui.text_edit.setPlainText(current_text)
-          self.current_file = current_file
-          self.gui.current_file = current_file
-          self.gui.update_label()
-        
-          # Ponownie podłącz sygnały
-          self.connect_signals()
-        
-          self.gui.update_status(f"Język zmieniony na {lang_manager.get_language_name()}")
+
+    def refresh_after_language_change(self):
+        """Odświeża całe GUI po zmianie języka.
+
+        HOTFIX: wcześniej istniała tylko change_language(language_code), którą
+        miało wywoływać menu "Język" (self.gui.language_actions) - menu, które
+        nigdzie nie było tworzone, więc ta ścieżka była martwym kodem. Jedynym
+        realnym sposobem zmiany języka jest zakładka Język w SettingsDialog,
+        która SAMA zapisuje nowy język (LanguageManager.save_language()) i
+        zwraca flagę "language_changed" w get_settings(). Ta metoda zajmuje się
+        wyłącznie odświeżeniem GUI (tekst, etykieta pliku, sygnały) - bez
+        ponownego zapisywania języka, żeby nie duplikować logiki z dialogu."""
+        current_text = self.gui.text_edit.toPlainText()
+        current_file = self.current_file
+
+        self.gui.update_language()
+
+        self.gui.text_edit.setPlainText(current_text)
+        self._set_current_file(current_file)
+        self.gui.update_label()
+
+        # HOTFIX (patrz też _safe_connect): update_language() odtwarza menu i
+        # toolbar, więc trzeba podłączyć sygnały do nowych obiektów akcji.
+        self.connect_signals()
+
+        self.gui.update_status(f"Język zmieniony na {LanguageManager().get_language_name()}")
     
     # ------------------------- Operacje na plikach -------------------------
     
     def new_file(self):
         self.gui.text_edit.clear()
-        self.current_file = None
+        self._set_current_file(None)
         self.password = None
         self.gui.update_label()
         self.gui.update_status("Nowy plik utworzony")
@@ -611,7 +664,7 @@ class SafePadApp:
             self.gui.text_edit.setPlainText(decrypted_data.decode('utf-8'))
             
             self.password = password
-            self.current_file = file_path
+            self._set_current_file(file_path)
             self.gui.update_label()
             self.gui.update_status(f"Otwarto: {os.path.basename(file_path)}")
             
@@ -632,8 +685,15 @@ class SafePadApp:
         if file_path:
             if not file_path.endswith('.sscr'):
                 file_path += '.sscr'
-            self.current_file = file_path
-            self._save_current_file(file_path)
+            # HOTFIX: current_file był ustawiany PRZED zapisem - jeśli
+            # użytkownik anulował okno hasła w _save_current_file (co
+            # zwraca False i niczego nie zapisuje), aplikacja i tak
+            # zostawała w stanie "plik otwarty" dla pliku, który nigdy nie
+            # powstał. Ustawiamy current_file tylko po potwierdzonym
+            # sukcesie zapisu.
+            if self._save_current_file(file_path):
+                self._set_current_file(file_path)
+                self.gui.update_label()
     
     def _save_current_file(self, file_path):
         try:
@@ -798,23 +858,59 @@ class SafePadApp:
     
     def _cancel_crypto(self):
         if self.crypto_worker and self.crypto_worker.isRunning():
-            output_path = getattr(self.crypto_worker, 'output_path', None) or \
-                          getattr(self.crypto_worker, 'output_folder', None)
+            # HOTFIX (KRYTYCZNE): wcześniej ta metoda usuwała
+            # output_path/output_folder niezależnie od tego, czy operacja to
+            # szyfrowanie czy DESZYFROWANIE. Dla FolderEncryptWorker
+            # output_path to nowo tworzony plik .enc - bezpiecznie go
+            # usunąć przy anulowaniu. Ale dla FolderDecryptWorker
+            # output_folder to ISTNIEJĄCY folder użytkownika (ten sam, który
+            # user_confirmed nadpisać) - _extract_zip celowo nie dotyka go,
+            # dopóki wypakowywanie nie powiedzie się w 100% (rozpakowuje do
+            # osobnego staging-dir i podmienia folder na końcu). Usuwanie
+            # output_folder tutaj niszczyło dane użytkownika, mimo że nic
+            # jeszcze nie zdążyło ich zastąpić - anulowanie deszyfrowania
+            # kasowało oryginalny, nietknięty folder.
+            is_decrypt = isinstance(self.crypto_worker, FolderDecryptWorker)
+            fresh_output_path = None if is_decrypt else getattr(self.crypto_worker, 'output_path', None)
 
-            # Proś wątek o zatrzymanie się przy najbliższej bezpiecznej okazji
-            # (między chunkami) zamiast wymuszać terminate(), które może
-            # przerwać wątek w trakcie zapisu do pliku i zostawić dane w
-            # niespójnym stanie (np. częściowo zapisany plik/uszkodzony
-            # folder tymczasowy).
             self.crypto_worker.request_cancel()
-            self.crypto_worker.wait()
+
+            # HOTFIX: self.crypto_worker.wait() blokował całą pętlę zdarzeń
+            # Qt (zamrożone okno) aż do zakończenia bieżącego chunku, co przy
+            # dużych CHUNK_SIZE mogło trwać dziesiątki sekund. Czekamy przez
+            # lokalny QEventLoop odpytywany krótkim QTimer-em, żeby GUI
+            # zostało responsywne w czasie oczekiwania na bezpieczne
+            # zatrzymanie się wątku. UWAGA: nie można tu użyć sygnału
+            # crypto_worker.finished/error jako warunku zakończenia - obie
+            # klasy workerów DEKLARUJĄ WŁASNE sygnały o tych nazwach
+            # (finished/error = pyqtSignal(str)), które przesłaniają wbudowany
+            # sygnał QThread "wątek faktycznie się zakończył", a na ścieżce
+            # anulowania (_WorkerCancelled) żaden z tych własnych sygnałów
+            # nie jest emitowany - czekanie na nie zawiesiłoby się w
+            # nieskończoność. Odpytujemy więc isRunning() bezpośrednio.
+            from PyQt6.QtCore import QEventLoop, QTimer
+            if self.crypto_worker.isRunning():
+                wait_loop = QEventLoop()
+                poll_timer = QTimer()
+                poll_timer.setInterval(50)
+
+                def _check_still_running():
+                    if not self.crypto_worker.isRunning():
+                        poll_timer.stop()
+                        wait_loop.quit()
+
+                poll_timer.timeout.connect(_check_still_running)
+                poll_timer.start()
+                wait_loop.exec()
+            self.crypto_worker.wait()  # domknięcie - powinno już być zakończone
+
             self.progress.close()
             
             try:
-                if output_path and os.path.isfile(output_path):
-                    secure_delete(output_path)
-                elif output_path and os.path.isdir(output_path):
-                    shutil.rmtree(output_path, ignore_errors=True)
+                if fresh_output_path and os.path.isfile(fresh_output_path):
+                    secure_delete(fresh_output_path)
+                elif fresh_output_path and os.path.isdir(fresh_output_path):
+                    shutil.rmtree(fresh_output_path, ignore_errors=True)
             except Exception:
                 pass
             
@@ -956,6 +1052,12 @@ class SafePadApp:
                 )
                 self.gui.text_edit.setPlainText(decrypted.decode('utf-8'))
                 self.gui.update_status("Sesja przywrócona")
+
+                # HOTFIX: po udanym przywróceniu usuwamy plik backupu - był
+                # zostawiany na zawsze w %TEMP%, mimo że jego zawartość
+                # została już skonsumowana (a autozapis i tak nadpisze go
+                # nową kopią przy kolejnym tick-u).
+                secure_delete(temp_file)
         except Exception as e:
             print(f"Błąd ładowania sesji: {e}")
     
@@ -973,6 +1075,12 @@ class SafePadApp:
         
         # Aktualizuj lokalne ustawienia
         self.settings = new_settings
+
+        # HOTFIX: self.gui.settings nigdy nie było aktualizowane - GUI (w tym
+        # closeEvent(), które sprawdza "minimize_to_tray") wciąż widziało
+        # ustawienia domyślne z __init__ ({}), niezależnie od tego, co
+        # użytkownik zapisał w oknie Ustawień.
+        self.gui.settings = new_settings
         
         # Aktualizuj szyfrowanie z nowym poziomem
         level = new_settings.get("encryption_level", "medium")
@@ -981,6 +1089,13 @@ class SafePadApp:
         # Jeśli hasło do backupów zostało zmienione, przeładuj je
         if new_settings.get("backup_password_changed"):
             self.load_backup_password()
+
+        # HOTFIX: SettingsDialog.get_settings() zwracał flagę
+        # "language_changed", ale nikt jej dotąd nie odczytywał - zmiana
+        # języka w oknie Ustawień była zapisywana do rejestru, ale GUI nie
+        # było odświeżane, więc efekt było widać dopiero po restarcie apki.
+        if new_settings.get("language_changed"):
+            self.refresh_after_language_change()
         
         self.gui.update_status("Ustawienia zapisane w rejestrze")
     

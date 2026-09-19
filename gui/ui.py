@@ -27,7 +27,9 @@ class SettingsDialog(QDialog):
     
     def __init__(self, parent=None, settings=None):
         super().__init__(parent)
-        self.parent = parent
+        # HOTFIX: nie przypisujemy własnego atrybutu self.parent - przesłaniałoby
+        # to metodę QObject.parent(). Rodzic jest już śledzony przez Qt (dostępny
+        # przez self.parent()), więc dodatkowy atrybut był i tak nieużywany.
         self.settings = settings or {}
         self.backup_password_changed = False
         self.setup_ui()
@@ -547,6 +549,34 @@ class SettingsDialog(QDialog):
             }
         """)
         appearance_layout.addWidget(self.notifications_cb)
+
+        # HOTFIX: brakujący checkbox dla minimize_to_tray. Registryconf.save_settings
+        # zapisywał ten klucz, a load_settings go odczytywał, ale nie istniał żaden
+        # widget, który by go faktycznie ustawiał - get_settings() zawsze zwracał
+        # wartość domyślną (False), więc ustawienie nigdy nie przetrwało zapisu.
+        self.minimize_to_tray_cb = QCheckBox(tr("appearance_minimize_to_tray"))
+        self.minimize_to_tray_cb.setChecked(self.settings.get("minimize_to_tray", False))
+        self.minimize_to_tray_cb.setStyleSheet("""
+            QCheckBox {
+                color: #FAFAFA;
+                spacing: 8px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+            QCheckBox::indicator:unchecked {
+                border: 1px solid #555555;
+                background-color: #3C3C3C;
+                border-radius: 3px;
+            }
+            QCheckBox::indicator:checked {
+                border: 1px solid #FFC107;
+                background-color: #FFC107;
+                border-radius: 3px;
+            }
+        """)
+        appearance_layout.addWidget(self.minimize_to_tray_cb)
         
         layout.addWidget(appearance_group)
         layout.addStretch()
@@ -926,8 +956,6 @@ class SettingsDialog(QDialog):
         """Run Argon2ID benchmark"""
         try:
             from others.others import Argon2Benchmark
-            from crypto.encryption_decryption import Registryconf
-            from PyQt6.QtCore import QThread, pyqtSignal
             
             self.benchmark_progress = QProgressDialog(tr("progress_preparing"), tr("progress_cancel"), 0, 100, self)
             self.benchmark_progress.setWindowTitle(tr("benchmark_title"))
@@ -964,19 +992,32 @@ class SettingsDialog(QDialog):
                 }
             """)
             
+            from others.others import _BenchmarkCancelled
+
             class BenchmarkThread(QThread):
                 progress = pyqtSignal(int)
                 status = pyqtSignal(str)
                 finished = pyqtSignal(dict)
                 error = pyqtSignal(str)
-                
+                cancelled = pyqtSignal()
+
+                def __init__(self):
+                    super().__init__()
+                    self._cancel_requested = False
+
+                def request_cancel(self):
+                    self._cancel_requested = True
+
                 def run(self):
                     try:
                         results = Argon2Benchmark.run_benchmark(
                             progress_callback=lambda p: self.progress.emit(p),
-                            status_callback=lambda s: self.status.emit(s)
+                            status_callback=lambda s: self.status.emit(s),
+                            cancel_check=lambda: self._cancel_requested
                         )
                         self.finished.emit(results)
+                    except _BenchmarkCancelled:
+                        self.cancelled.emit()
                     except Exception as e:
                         self.error.emit(str(e))
             
@@ -985,7 +1026,12 @@ class SettingsDialog(QDialog):
             self.benchmark_thread.status.connect(self.benchmark_progress.setLabelText)
             self.benchmark_thread.finished.connect(self.on_benchmark_finished)
             self.benchmark_thread.error.connect(self.on_benchmark_error)
-            self.benchmark_progress.canceled.connect(self.benchmark_thread.terminate)
+            self.benchmark_thread.cancelled.connect(self.benchmark_progress.close)
+            # HOTFIX: żądamy współpracującego przerwania (sprawdzanego między
+            # kolejnymi wywołaniami Argon2) i CZEKAMY na zakończenie wątku,
+            # zamiast wołać QThread.terminate(), które mogłoby zabić wątek
+            # w trakcie trzymania dużego bufora pamięci Argon2ID.
+            self.benchmark_progress.canceled.connect(self.benchmark_thread.request_cancel)
             
             self.benchmark_thread.start()
             self.benchmark_progress.exec()
@@ -1089,6 +1135,7 @@ class SettingsDialog(QDialog):
             "encryption_level": encryption_level,
             "dark_mode": self.dark_mode_cb.isChecked(),
             "notifications": self.notifications_cb.isChecked(),
+            "minimize_to_tray": self.minimize_to_tray_cb.isChecked(),
             "remind_later": self.settings.get("remind_later", False),
             "backup_password_changed": self.backup_password_changed,
             "language_changed": language_changed
@@ -1142,7 +1189,16 @@ class SettingsDialog(QDialog):
 
 class SafePadGUI(QMainWindow):
     """Główne okno aplikacji SafePad - tylko GUI z obsługą wielojęzyczności"""
-    
+
+    # HOTFIX: sygnały, którymi GUI informuje warstwę aplikacji (main.py) o
+    # zdarzeniach z traya i o próbie zamknięcia okna. Wcześniej show_action
+    # i exit_action w setup_system_tray() były lokalnymi zmiennymi, do
+    # których nic nigdy nie było podłączone - kliknięcie "Pokaż"/"Zakończ"
+    # w menu traya nie robiło absolutnie nic.
+    tray_show_requested = pyqtSignal()
+    tray_exit_requested = pyqtSignal()
+    close_requested = pyqtSignal()
+
     def __init__(self):
         super().__init__()
         self.settings = {}
@@ -1192,9 +1248,6 @@ class SafePadGUI(QMainWindow):
                 font-size: 12px;
                 selection-background-color: #FFC107;
                 selection-color: #000000;
-            }
-            QTextEdit::placeholder {
-                color: #888888;
             }
         """)
         main_layout.addWidget(self.text_edit)
@@ -1291,8 +1344,12 @@ class SafePadGUI(QMainWindow):
     
       file_menu.addSeparator()
     
+      # HOTFIX: nie ustawiamy tu skrótu Alt+F4 - system operacyjny/menedżer
+      # okien już wiąże Alt+F4 z zamknięciem okna, a powiązanie tego samego
+      # skrótu z akcją Qt mogło prowadzić do niespójnego zachowania
+      # (podwójne wywołanie / konflikt kontekstu skrótu) w zależności od
+      # platformy.
       self.exit_action = QAction(tr("menu_exit"), self)
-      self.exit_action.setShortcut("Alt+F4")
       file_menu.addAction(self.exit_action)
     
       # Edit menu
@@ -1341,13 +1398,27 @@ class SafePadGUI(QMainWindow):
       
     
     def create_toolbar(self):
-        """Create toolbar at the bottom"""
-        self.toolbar = QToolBar()
-        self.toolbar.setIconSize(QSize(24, 24))
-        self.toolbar.setMovable(False)
-        
-        while self.toolbar.actions():
-            self.toolbar.removeAction(self.toolbar.actions()[0])
+        """Create toolbar at the bottom.
+
+        HOTFIX: wcześniej ta metoda tworzyła NOWY obiekt QToolBar
+        (self.toolbar = QToolBar()) przy każdym wywołaniu. To działało przy
+        pierwszym uruchomieniu (setup_ui() dodaje self.toolbar do layoutu
+        zaraz po tym wywołaniu), ale update_language() woła create_toolbar()
+        ponownie PO tym, jak toolbar już siedzi w main_layout - nowy obiekt
+        nigdy nie trafiał do layoutu, więc stary (z przyciskami w starym
+        języku, ale wciąż podłączonymi sygnałami) zostawał widoczny, a
+        self.toolbar_buttons wskazywało na nowe, niewidoczne przyciski, do
+        których connect_signals() podłączał sloty. W efekcie po zmianie
+        języka toolbar przestawał reagować na kliknięcia. Teraz, jeśli
+        toolbar już istnieje, czyścimy go (QToolBar.clear() usuwa też
+        widgety dodane przez addWidget) i wypełniamy od nowa - obiekt
+        pozostaje ten sam, więc referencja w main_layout wciąż jest aktualna."""
+        if not hasattr(self, 'toolbar') or self.toolbar is None:
+            self.toolbar = QToolBar()
+            self.toolbar.setIconSize(QSize(24, 24))
+            self.toolbar.setMovable(False)
+        else:
+            self.toolbar.clear()
         
         buttons = [
             (tr("toolbar_new"), "📄"),
@@ -1470,16 +1541,46 @@ class SafePadGUI(QMainWindow):
         # Create tray menu
         tray_menu = QMenu()
         
-        show_action = QAction(tr("menu_show"), self)
-        tray_menu.addAction(show_action)
+        # HOTFIX: show_action/exit_action były wcześniej zmiennymi lokalnymi,
+        # do których triggered nigdy nie było podłączone - menu traya było
+        # czysto kosmetyczne. Trzymamy je jako atrybuty i emitujemy sygnały,
+        # które main.py podłącza do rzeczywistej logiki (show_normal/on_exit).
+        self.tray_show_action = QAction(tr("menu_show"), self)
+        self.tray_show_action.triggered.connect(self.tray_show_requested.emit)
+        tray_menu.addAction(self.tray_show_action)
         
         tray_menu.addSeparator()
         
-        exit_action = QAction(tr("menu_exit"), self)
-        tray_menu.addAction(exit_action)
+        self.tray_exit_action = QAction(tr("menu_exit"), self)
+        self.tray_exit_action.triggered.connect(self.tray_exit_requested.emit)
+        tray_menu.addAction(self.tray_exit_action)
         
         self.tray_icon.setContextMenu(tray_menu)
+        # Kliknięcie/dwuklik na ikonie traya (nie tylko menu kontekstowe) też
+        # powinno przywracać okno.
+        self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger,
+                      QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.tray_show_requested.emit()
+
+    def closeEvent(self, event):
+        """Obsługa zamknięcia okna (krzyżyk, Alt+F4, kill menedżera okien).
+
+        HOTFIX: wcześniej nie było żadnego closeEvent - zamknięcie okna
+        inaczej niż przez menu "Plik -> Zakończ" pomijało on_exit()
+        (a więc i zapis sesji do pliku tymczasowego) i zamykało proces
+        bez czyszczenia/zapisu. Emitujemy close_requested i pozwalamy
+        warstwie aplikacji (main.py) zdecydować - w tym o ewentualnym
+        zminimalizowaniu do traya zamiast zamykania."""
+        if self.settings.get("minimize_to_tray", False) and self.tray_icon and self.tray_icon.isVisible():
+            event.ignore()
+            self.hide()
+        else:
+            self.close_requested.emit()
+            event.accept()
     
     def update_line_col(self):
         """Update line and column information in status bar"""
@@ -1524,15 +1625,30 @@ class SafePadGUI(QMainWindow):
             return self.toolbar_buttons[index]
         return None
     
+    _MENU_ACTION_ATTRS = {
+        ("file", "new"): "new_action",
+        ("file", "open"): "open_action",
+        ("file", "save"): "save_action",
+        ("file", "read_only"): "read_only_action",
+        ("file", "encrypt_folder"): "encrypt_folder_action",
+        ("file", "decrypt_folder"): "decrypt_folder_action",
+        ("file", "exit"): "exit_action",
+        ("edit", "undo"): "undo_action",
+        ("edit", "redo"): "redo_action",
+        ("edit", "cut"): "cut_action",
+        ("edit", "copy"): "copy_action",
+        ("edit", "paste"): "paste_action",
+        ("edit", "select_all"): "select_all_action",
+        ("settings", "panel"): "settings_panel_action",
+        ("help", "about"): "about_action",
+    }
+
     def get_menu_action(self, menu_name, action_name):
-        """Get menu action by name"""
-        if menu_name == "file":
-            return self.file_menu_actions.get(action_name)
-        elif menu_name == "settings":
-            return self.settings_menu_actions.get(action_name)
-        elif menu_name == "help":
-            return self.help_menu_actions.get(action_name)
-        return None
+        """Get menu action by (menu_name, action_name), e.g. ('file', 'save')."""
+        attr = self._MENU_ACTION_ATTRS.get((menu_name, action_name))
+        if attr is None:
+            return None
+        return getattr(self, attr, None)
 
 
 def main():
