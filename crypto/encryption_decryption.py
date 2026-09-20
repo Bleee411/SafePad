@@ -253,7 +253,19 @@ class EncryptionCEO:
             raise
     
     def generate_serpent_key(self, password, salt):
-        """Generuje osobny klucz dla Serpent (256 bit)"""
+        """
+        Generuje osobny klucz dla Serpent (256 bit).
+
+        UWAGA: `salt` przekazywany tutaj (serpent_salt) jest już od początku
+        generowany niezależnym wywołaniem os.urandom(), oddzielnym od
+        aes_salt użytego w generate_key(). Poniższe XOR z 0xAA nie dodaje
+        więc żadnej realnej separacji kryptograficznej ponad to, co daje
+        sama niezależna losowość salta - jest nieszkodliwe, ale zbędne.
+        CELOWO NIE usuwamy/zmieniamy tej transformacji: zmiana sposobu
+        wyprowadzania klucza złamałaby kompatybilność wsteczną i
+        uniemożliwiła odszyfrowanie plików zaszyfrowanych wcześniejszymi
+        wersjami aplikacji.
+        """
         try:
             different_salt = bytes([b ^ 0xAA for b in salt])
             key = argon2.low_level.hash_secret_raw(
@@ -430,9 +442,24 @@ class EncryptionCEO:
         # nieodróżnialnego komunikatu błędu dla obu etapów.
         generic_error = "Nieprawidłowe hasło lub uszkodzone dane"
 
-        # Krok 1: Odszyfrowanie Serpent-CBC
+        # HOTFIX: obie derywacje kluczy (Argon2ID, kosztowne - rzędu
+        # dziesiątek/setek ms) muszą zostać wykonane PRZED jakąkolwiek próbą
+        # deszyfrowania, niezależnie od wyniku. Wcześniej generate_key()
+        # było wołane tylko wewnątrz kroku 2 (AES), więc błąd paddingu
+        # Serpent-CBC (krok 1) zwracał się natychmiast, a błąd tagu AES-GCM
+        # (krok 2) - dopiero po pełnym koszcie KDF. Sam identyczny tekst
+        # błędu nie chroni przed atakiem czasowym: różnica czasu odpowiedzi
+        # wystarcza, by odróżnić błąd paddingu CBC od błędu autentykacji GCM
+        # (klasyczny warunek ataku Vaudenay'a). Licząc oba klucze z góry,
+        # obie ścieżki błędu trwają tak samo długo.
         try:
             serpent_key = self.generate_serpent_key(password, serpent_salt)
+            aes_key = self.generate_key(password, aes_salt)
+        except Exception:
+            raise ValueError(generic_error)
+
+        # Krok 1: Odszyfrowanie Serpent-CBC
+        try:
             # Deszyfruj Serpent (zwraca IV + padded AES data)
             decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
 
@@ -446,7 +473,6 @@ class EncryptionCEO:
 
         # Krok 2: Odszyfrowanie AES-GCM
         try:
-            aes_key = self.generate_key(password, aes_salt)
             aesgcm = AESGCM(aes_key)
             decrypted_data = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
         except Exception:
