@@ -1329,6 +1329,12 @@ class SafePadGUI(QMainWindow):
       self.save_action.setShortcut("Ctrl+S")
       file_menu.addAction(self.save_action)
     
+      self.save_as_vault_action = QAction(tr("menu_save_as_vault"), self)
+      file_menu.addAction(self.save_as_vault_action)
+    
+      self.import_as_vault_action = QAction(tr("menu_import_as_vault"), self)
+      file_menu.addAction(self.import_as_vault_action)
+    
       file_menu.addSeparator()
     
       self.read_only_action = QAction(tr("menu_read_only"), self)
@@ -1629,6 +1635,8 @@ class SafePadGUI(QMainWindow):
         ("file", "new"): "new_action",
         ("file", "open"): "open_action",
         ("file", "save"): "save_action",
+        ("file", "save_as_vault"): "save_as_vault_action",
+        ("file", "import_as_vault"): "import_as_vault_action",
         ("file", "read_only"): "read_only_action",
         ("file", "encrypt_folder"): "encrypt_folder_action",
         ("file", "decrypt_folder"): "decrypt_folder_action",

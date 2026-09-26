@@ -583,3 +583,85 @@ class EncryptionCEO:
         return decrypted_data
     
     # NOTE: tutaj istniał martwy kod run_argon2_benchmark, który został usunięty, ponieważ nie był wywoływany i nie był powiązany z żadną klasą. Logika benchmarku Argon2ID została przeniesiona do ui.py (SettingsDialog.run_benchmark / BenchmarkThread).
+
+
+class VaultFormat:
+    """
+    Format kontenera "sejfu" wielu notatek (plik .spvault).
+
+    Zamiast wprowadzać nowe prymitywy kryptograficzne, sejf to po prostu
+    JEDEN blob JSON (indeks + treść wszystkich wpisów) zaszyfrowany
+    dokładnie tym samym wywołaniem, które dziś szyfruje pojedynczą notatkę:
+    EncryptionCEO.encrypt_data()/decrypt_data(). Zero nowego kodu w silniku
+    kryptograficznym do audytu - to tylko (de)serializacja.
+
+    Konsekwencja tego wyboru: odblokowanie sejfu to zawsze JEDNO wywołanie
+    Argon2id, niezależnie od liczby wpisów w środku (tak jak dziś przy
+    jednej notatce) - koszt otwarcia nie rośnie z liczbą wpisów.
+
+    Format pliku na dysku:
+        MAGIC (7 bajtów, b"SPVLT01")
+        + EncryptionCEO.encrypt_data(password, vault_json_bytes)
+
+    gdzie vault_json (PRZED zaszyfrowaniem) to:
+        {
+          "format_version": 1,
+          "entries": {
+            "<uuid4>": {
+              "title": str,
+              "content": str,
+              "created_at": iso8601 str,
+              "modified_at": iso8601 str
+            },
+            ...
+          }
+        }
+    """
+    MAGIC = b"SPVLT01"
+    FORMAT_VERSION = 1
+    # Sanity limit - notatki tekstowe nie potrzebują sejfu wielkości setek MB;
+    # ogranicza to szkodę, jaką mógłby zrobić podrzucony, spreparowany plik
+    # (np. próba wymuszenia ogromnej alokacji przy json.loads()).
+    MAX_VAULT_SIZE = 100 * 1024 * 1024  # 100 MB
+
+    @classmethod
+    def is_vault_file(cls, data: bytes) -> bool:
+        """Sprawdza nagłówek pliku bez próby deszyfrowania - pozwala odróżnić
+        sejf od zwykłej notatki .sscr i dać sensowny komunikat błędu."""
+        return data[:len(cls.MAGIC)] == cls.MAGIC
+
+    @classmethod
+    def to_bytes(cls, crypto: "EncryptionCEO", password: str, entries: dict) -> bytes:
+        """Serializuje i szyfruje cały sejf jako jeden blob."""
+        vault_json = {
+            "format_version": cls.FORMAT_VERSION,
+            "entries": entries,
+        }
+        payload = json.dumps(vault_json, ensure_ascii=False).encode('utf-8')
+        return cls.MAGIC + crypto.encrypt_data(password, payload)
+
+    @classmethod
+    def from_bytes(cls, crypto: "EncryptionCEO", password: str, data: bytes) -> dict:
+        """Odszyfrowuje sejf i zwraca słownik wpisów {id: {title, content, ...}}."""
+        if len(data) > cls.MAX_VAULT_SIZE:
+            raise ValueError("Plik sejfu jest podejrzanie duży")
+        if not cls.is_vault_file(data):
+            raise ValueError("To nie jest plik sejfu SafePad (nieprawidłowy nagłówek)")
+
+        payload = crypto.decrypt_data(password, data[len(cls.MAGIC):])
+
+        try:
+            vault_json = json.loads(payload.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError(f"Uszkodzona struktura sejfu: {e}")
+
+        if vault_json.get("format_version") != cls.FORMAT_VERSION:
+            raise ValueError(
+                f"Nieobsługiwana wersja formatu sejfu: {vault_json.get('format_version')!r}"
+            )
+
+        entries = vault_json.get("entries")
+        if not isinstance(entries, dict):
+            raise ValueError("Uszkodzona struktura sejfu (brak listy wpisów)")
+
+        return entries
