@@ -458,6 +458,15 @@ class SafePadApp:
         self.current_file = None
         self.crypto_worker = None
         self.backup_password = None
+
+        # HOTFIX: stan "trybu sejfu" - gdy != None, oznacza że w edytorze
+        # znajduje się treść wczytana z konkretnego wpisu konkretnego pliku
+        # .spvault, a Ctrl+S (save_file) musi zapisać ją z powrotem TAM,
+        # a nie próbować zapisać jako nowy, osobny plik .sscr.
+        self.current_vault_path = None
+        self.current_vault_password = None
+        self.current_vault_entries = None
+        self.current_vault_entry_id = None
         
         # Wczytaj ustawienia
         self.settings = Registryconf.load_settings()
@@ -550,6 +559,7 @@ class SafePadApp:
       if hasattr(self.gui, 'new_action'):
           sc(self.gui.new_action.triggered, self.new_file)
           sc(self.gui.open_action.triggered, self.open_file)
+          sc(self.gui.open_vault_action.triggered, self.open_vault)
           sc(self.gui.save_action.triggered, self.save_file)
           sc(self.gui.save_as_vault_action.triggered, self.save_note_as_vault)
           sc(self.gui.import_as_vault_action.triggered, self.import_file_as_vault)
@@ -641,10 +651,25 @@ class SafePadApp:
     
     def new_file(self):
         self.gui.text_edit.clear()
+        self._exit_vault_mode()
         self._set_current_file(None)
         self.password = None
         self.gui.update_label()
         self.gui.update_status("Nowy plik utworzony")
+
+    def _exit_vault_mode(self):
+        """Czyści stan trybu sejfu.
+
+        Wołane z new_file/open_file/save_as_file, żeby przejście do
+        pracy na zwykłym pojedynczym plniku .sscr nie zostawiało "widma"
+        starego wpisu sejfu, do którego Ctrl+S mógłby przypadkowo zapisać
+        zupełnie inną, niepowiązaną treść.
+        """
+        self.current_vault_path = None
+        self.current_vault_password = None
+        self.current_vault_entries = None
+        self.current_vault_entry_id = None
+        self.gui.vault_info = None
     
     def open_file(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -667,6 +692,7 @@ class SafePadApp:
             decrypted_data = self.crypto.decrypt_data(password, encrypted_data)
             self.gui.text_edit.setPlainText(decrypted_data.decode('utf-8'))
             
+            self._exit_vault_mode()
             self.password = password
             self._set_current_file(file_path)
             self.gui.update_label()
@@ -674,9 +700,120 @@ class SafePadApp:
             
         except Exception as e:
             QMessageBox.critical(self.gui, "Błąd", f"Nieprawidłowe hasło lub plik uszkodzony.\n\n{e}")
+
+    def open_vault(self):
+        """Otwiera plik sejfu (.spvault). Jeśli sejf ma więcej niż jeden
+        wpis, pyta który z nich wczytać do edytora."""
+        vault_path, _ = QFileDialog.getOpenFileName(
+            self.gui, "Otwórz sejf", "",
+            "SafePad Vault (*.spvault);;All Files (*.*)"
+        )
+        if not vault_path:
+            return
+
+        password, ok = QInputDialog.getText(
+            self.gui, "Hasło sejfu",
+            f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':",
+            QLineEdit.EchoMode.Password
+        )
+        if not ok or not password:
+            return
+
+        try:
+            with open(vault_path, 'rb') as f:
+                data = f.read()
+            entries = VaultFormat.from_bytes(self.crypto, password, data)
+        except Exception as e:
+            QMessageBox.critical(
+                self.gui, "Błąd",
+                "Nie udało się otworzyć sejfu (złe hasło, uszkodzony plik, "
+                f"albo to nie jest plik sejfu SafePad).\n\n{e}"
+            )
+            return
+
+        if not entries:
+            QMessageBox.information(
+                self.gui, "Sejf jest pusty", "Ten sejf nie zawiera żadnych wpisów."
+            )
+            return
+
+        if len(entries) == 1:
+            entry_id = next(iter(entries))
+        else:
+            # Sortujemy po tytule i numerujemy, żeby uniknąć niejednoznaczności
+            # w rzadkim przypadku dwóch wpisów o identycznym tytule.
+            sorted_items = sorted(entries.items(), key=lambda kv: kv[1].get('title', ''))
+            display_to_id = {}
+            display_list = []
+            for idx, (eid, entry) in enumerate(sorted_items, start=1):
+                display = f"{idx}. {entry.get('title', '(bez nazwy)')}"
+                display_list.append(display)
+                display_to_id[display] = eid
+
+            chosen, ok = QInputDialog.getItem(
+                self.gui, "Wybierz wpis",
+                f"Sejf zawiera {len(entries)} wpisów - który otworzyć?",
+                display_list, 0, False
+            )
+            if not ok or not chosen:
+                return
+            entry_id = display_to_id[chosen]
+
+        self._enter_vault_entry(vault_path, password, entries, entry_id)
+
+    def _enter_vault_entry(self, vault_path, password, entries, entry_id):
+        """Wczytuje konkretny wpis sejfu do edytora i przełącza aplikację w
+        tryb sejfu - od tej pory Ctrl+S zapisuje z powrotem do tego wpisu
+        w tym samym pliku .spvault, a nie jako osobny plik .sscr."""
+        entry = entries[entry_id]
+
+        # Wychodzimy z ewentualnego trybu pojedynczego pliku, żeby nie
+        # zostawić dwóch "aktualnie otwartych plików" naraz.
+        self.password = None
+        self._set_current_file(None)
+
+        self.current_vault_path = vault_path
+        self.current_vault_password = password
+        self.current_vault_entries = entries
+        self.current_vault_entry_id = entry_id
+
+        self.gui.text_edit.setPlainText(entry.get('content', ''))
+        self.gui.text_edit.document().setModified(False)
+
+        self.gui.vault_info = f"🔒 {os.path.basename(vault_path)} → {entry.get('title', '')}"
+        self.gui.update_label()
+        self.gui.update_status(
+            f"Otwarto wpis '{entry.get('title', '')}' z sejfu {os.path.basename(vault_path)}"
+        )
+
+    def _save_current_vault_entry(self):
+        """Zapisuje bieżącą treść edytora z powrotem do aktywnego wpisu w
+        aktywnym sejfie (Ctrl+S w trybie sejfu)."""
+        text = self.gui.text_edit.toPlainText()
+        now = datetime.now(timezone.utc).isoformat()
+        entry = self.current_vault_entries[self.current_vault_entry_id]
+        entry['content'] = text
+        entry['modified_at'] = now
+
+        try:
+            self._write_vault_atomically(
+                self.current_vault_path, self.crypto,
+                self.current_vault_password, self.current_vault_entries
+            )
+        except Exception as e:
+            QMessageBox.critical(self.gui, "Błąd zapisu", f"Nie udało się zapisać sejfu:\n\n{e}")
+            return
+
+        self.gui.text_edit.document().setModified(False)
+        self.gui.update_status(
+            f"Zapisano wpis '{entry.get('title', '')}' w sejfie "
+            f"{os.path.basename(self.current_vault_path)}"
+        )
     
     def save_file(self):
-        if self.current_file:
+        if self.current_vault_path:
+            self._save_current_vault_entry()
+        elif self.current_file:
             self._save_current_file(self.current_file)
         else:
             self.save_as_file()
@@ -696,6 +833,7 @@ class SafePadApp:
             # powstał. Ustawiamy current_file tylko po potwierdzonym
             # sukcesie zapisu.
             if self._save_current_file(file_path):
+                self._exit_vault_mode()
                 self._set_current_file(file_path)
                 self.gui.update_label()
     
@@ -840,6 +978,10 @@ class SafePadApp:
             QMessageBox.critical(self.gui, "Błąd zapisu", f"Nie udało się zapisać sejfu:\n\n{e}")
             return
 
+        # HOTFIX: bez tego, kolejne Ctrl+S poszłoby albo do zupełnie innego
+        # wpisu sejfu (jeśli taki był otwarty przed tą operacją), albo do
+        # osobnego pliku .sscr - a nie do wpisu, który właśnie zapisaliśmy.
+        self._enter_vault_entry(vault_path, password, entries, entry_id)
         self.gui.update_status(
             f"Zapisano jako sejf: {os.path.basename(vault_path)} (wpis: {title})"
         )

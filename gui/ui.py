@@ -1203,6 +1203,7 @@ class SafePadGUI(QMainWindow):
         super().__init__()
         self.settings = {}
         self.current_file = None
+        self.vault_info = None  # ustawiane przez main.py, gdy edytowany jest wpis sejfu
         
         self.setup_ui()
         self.apply_amber_night_theme()
@@ -1324,6 +1325,9 @@ class SafePadGUI(QMainWindow):
       self.open_action = QAction(tr("menu_open"), self)
       self.open_action.setShortcut("Ctrl+O")
       file_menu.addAction(self.open_action)
+    
+      self.open_vault_action = QAction(tr("menu_open_vault"), self)
+      file_menu.addAction(self.open_vault_action)
     
       self.save_action = QAction(tr("menu_save"), self)
       self.save_action.setShortcut("Ctrl+S")
@@ -1603,7 +1607,16 @@ class SafePadGUI(QMainWindow):
     
     def update_label(self):
         """Update file info label"""
-        if self.current_file:
+        # HOTFIX: gdy edytujemy wpis w sejfie (main.py ustawia self.vault_info),
+        # etykieta musi pokazywać "sejf → wpis", a nie sam self.current_file
+        # (który w trybie sejfu jest celowo wyzerowany - patrz
+        # SafePadApp._enter_vault_entry) - inaczej użytkownik nie miałby
+        # żadnej wizualnej wskazówki, że Ctrl+S zapisze do sejfu, nie do
+        # osobnego pliku .sscr.
+        vault_info = getattr(self, 'vault_info', None)
+        if vault_info:
+            self.file_label.setText(vault_info)
+        elif self.current_file:
             self.file_label.setText(tr("file_label").format(os.path.basename(self.current_file)))
         else:
             self.file_label.setText(tr("file_label_none"))
@@ -1634,6 +1647,7 @@ class SafePadGUI(QMainWindow):
     _MENU_ACTION_ATTRS = {
         ("file", "new"): "new_action",
         ("file", "open"): "open_action",
+        ("file", "open_vault"): "open_vault_action",
         ("file", "save"): "save_action",
         ("file", "save_as_vault"): "save_as_vault_action",
         ("file", "import_as_vault"): "import_as_vault_action",
