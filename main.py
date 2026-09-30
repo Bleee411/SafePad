@@ -13,14 +13,14 @@ import shutil
 import zipfile
 import uuid
 from datetime import datetime, timezone
-from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer
+from PyQt6.QtCore import QThread, pyqtSignal, Qt, QTimer, QEventLoop
 from PyQt6.QtWidgets import (QApplication, QMessageBox, QFileDialog, QInputDialog, 
                              QProgressDialog, QLineEdit, QDialog)
 from PyQt6.QtGui import QIcon
 import ctypes
 
 from others.languages import LanguageManager
-from gui.ui import SafePadGUI
+from gui.ui import SafePadGUI, ask_password
 from crypto.encryption_decryption import EncryptionCEO, Registryconf, VaultFormat
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from pyserpent import serpent_cbc_encrypt, serpent_cbc_decrypt
@@ -450,6 +450,46 @@ class FolderDecryptWorker(QThread):
         self.finished.emit(f"Folder odszyfrowany do: {os.path.basename(self.output_folder)}")
 
 
+class _BackgroundCall(QThread):
+    """Uruchamia dowolną funkcję (np. szyfrowanie z Argon2) w wątku roboczym."""
+    result_ready = pyqtSignal(object, object)  # (wynik, wyjątek)
+
+    def __init__(self, fn, args, kwargs):
+        super().__init__()
+        self._fn = fn
+        self._args = args
+        self._kwargs = kwargs
+
+    def run(self):
+        try:
+            result = self._fn(*self._args, **self._kwargs)
+        except BaseException as exc:
+            self.result_ready.emit(None, exc)
+            return
+        self.result_ready.emit(result, None)
+
+
+class _AutosaveWorker(QThread):
+    """Zapis kopii sesji w tle (Argon2 nie blokuje GUI co minutę)."""
+
+    def __init__(self, crypto, password, text, temp_file):
+        super().__init__()
+        self.crypto = crypto
+        self.password = password
+        self.text = text
+        self.temp_file = temp_file
+
+    def run(self):
+        try:
+            encrypted = self.crypto.encrypt_data(self.password, self.text.encode('utf-8'))
+            tmp_path = self.temp_file + ".tmp"
+            with open(tmp_path, 'wb') as f:
+                f.write(encrypted)
+            os.replace(tmp_path, self.temp_file)
+        except Exception as e:
+            print(f"Błąd zapisu sesji: {e}")
+
+
 class SafePadApp:
     """Główna klasa aplikacji - łączy GUI z logiką"""
     
@@ -458,6 +498,10 @@ class SafePadApp:
         self.current_file = None
         self.crypto_worker = None
         self.backup_password = None
+        # FIX (wydajność): stan pomocniczy dla operacji Argon2 w tle
+        self._bg_busy = False
+        self._autosave_worker = None
+        self._last_autosaved_text = None
 
         # HOTFIX: stan "trybu sejfu" - gdy != None, oznacza że w edytorze
         # znajduje się treść wczytana z konkretnego wpisu konkretnego pliku
@@ -508,9 +552,71 @@ class SafePadApp:
         # zapis, żeby to było prawdą, a nie tylko przy zamknięciu programu.
         self.autosave_timer = QTimer()
         self.autosave_timer.setInterval(60 * 1000)  # co 60 sekund
-        self.autosave_timer.timeout.connect(self.save_to_temp_file)
+        self.autosave_timer.timeout.connect(self._autosave_tick)
         self.autosave_timer.start()
     
+    def _run_in_background(self, fn, *args, label="Trwa przetwarzanie (Argon2)…", **kwargs):
+        """FIX (wydajność): wykonuje ciężką funkcję (Argon2 + szyfrowanie) w
+        wątku roboczym, a w tym czasie obsługuje zdarzenia GUI lokalną pętlą.
+
+        Wcześniej Argon2 liczył się w wątku GUI - w trybie kaskadowym to DWA
+        przebiegi z dużą pamięcią, więc okno (a przy dużym memory_cost cały
+        system) potrafiło zawisnąć. Semantyka dla wołającego się nie zmienia:
+        metoda zwraca wynik albo rzuca ten sam wyjątek co funkcja."""
+        if self._bg_busy:
+            # zabezpieczenie przed ponownym wejściem - wykonaj synchronicznie
+            return fn(*args, **kwargs)
+
+        self._bg_busy = True
+        state = {"done": False, "result": None, "error": None}
+        loop = QEventLoop()
+
+        def _finished(result, error):
+            state["result"] = result
+            state["error"] = error
+            state["done"] = True
+            loop.quit()
+
+        worker = _BackgroundCall(fn, args, kwargs)
+        worker.result_ready.connect(_finished)
+
+        dlg = QProgressDialog(label, None, 0, 0, self.gui)
+        dlg.setWindowTitle("SafePad")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        dlg.setMinimumDuration(200)  # szybkie operacje nie migają oknem
+
+        try:
+            worker.start()
+            if not state["done"]:
+                loop.exec()
+            worker.wait()
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            self._bg_busy = False
+
+        if state["error"] is not None:
+            raise state["error"]
+        return state["result"]
+
+    def _autosave_tick(self):
+        """Okresowy autozapis sesji w tle. Pomija cykl, gdy nic się nie
+        zmieniło, trwa inna operacja albo poprzedni zapis jeszcze się liczy."""
+        if self._bg_busy:
+            return
+        if self._autosave_worker is not None and self._autosave_worker.isRunning():
+            return
+        text = self.gui.text_edit.toPlainText()
+        if not text or text == self._last_autosaved_text:
+            return
+        temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+        self._last_autosaved_text = text
+        self._autosave_worker = _AutosaveWorker(
+            self.crypto, self.backup_password, text, temp_file
+        )
+        self._autosave_worker.start()
+
     def _set_current_file(self, file_path):
         """Ustawia aktualnie otwarty plik i synchronizuje go z GUI.
 
@@ -679,9 +785,7 @@ class SafePadApp:
         if not file_path:
             return
         
-        password, ok = QInputDialog.getText(
-            self.gui, "Hasło", "Podaj hasło:", QLineEdit.EchoMode.Password
-        )
+        password, ok = ask_password(self.gui, "Hasło", "Podaj hasło:")
         if not ok or not password:
             return
         
@@ -689,7 +793,8 @@ class SafePadApp:
             with open(file_path, 'rb') as f:
                 encrypted_data = f.read()
             
-            decrypted_data = self.crypto.decrypt_data(password, encrypted_data)
+            decrypted_data = self._run_in_background(
+                self.crypto.decrypt_data, password, encrypted_data)
             self.gui.text_edit.setPlainText(decrypted_data.decode('utf-8'))
             
             self._exit_vault_mode()
@@ -711,18 +816,15 @@ class SafePadApp:
         if not vault_path:
             return
 
-        password, ok = QInputDialog.getText(
-            self.gui, "Hasło sejfu",
-            f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':",
-            QLineEdit.EchoMode.Password
-        )
+        password, ok = ask_password(self.gui, "Hasło sejfu", f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':")
         if not ok or not password:
             return
 
         try:
             with open(vault_path, 'rb') as f:
                 data = f.read()
-            entries = VaultFormat.from_bytes(self.crypto, password, data)
+            entries = self._run_in_background(
+                VaultFormat.from_bytes, self.crypto, password, data)
         except Exception as e:
             QMessageBox.critical(
                 self.gui, "Błąd",
@@ -846,9 +948,7 @@ class SafePadApp:
         nie zgadzają/nie spełniają wymagań (w tych ostatnich dwóch
         przypadkach komunikat błędu jest już wyświetlony).
         """
-        pwd, ok = QInputDialog.getText(
-            self.gui, title, label, QLineEdit.EchoMode.Password
-        )
+        pwd, ok = ask_password(self.gui, title, label)
         if not ok or not pwd:
             return None
 
@@ -861,9 +961,7 @@ class SafePadApp:
             )
             return None
 
-        confirm, ok = QInputDialog.getText(
-            self.gui, "Potwierdź hasło", "Powtórz hasło:", QLineEdit.EchoMode.Password
-        )
+        confirm, ok = ask_password(self.gui, "Potwierdź hasło", "Powtórz hasło:")
         if not ok or pwd != confirm:
             QMessageBox.critical(self.gui, "Błąd", "Hasła nie są identyczne!")
             return None
@@ -875,7 +973,8 @@ class SafePadApp:
         trakcie zapisu (brak miejsca na dysku, awaria zasilania) nie
         zostawił pliku sejfu w połowie nadpisanym - ważniejsze niż przy
         pojedynczej notatce, bo sejf może zawierać wiele wpisów naraz."""
-        vault_bytes = VaultFormat.to_bytes(crypto, password, entries)
+        vault_bytes = self._run_in_background(
+            VaultFormat.to_bytes, crypto, password, entries)
         tmp_path = vault_path + ".tmp"
         with open(tmp_path, 'wb') as f:
             f.write(vault_bytes)
@@ -937,18 +1036,15 @@ class SafePadApp:
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-            password, ok = QInputDialog.getText(
-                self.gui, "Hasło sejfu",
-                f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':",
-                QLineEdit.EchoMode.Password
-            )
+            password, ok = ask_password(self.gui, "Hasło sejfu", f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':")
             if not ok or not password:
                 return
 
             try:
                 with open(vault_path, 'rb') as f:
                     existing_data = f.read()
-                entries = VaultFormat.from_bytes(self.crypto, password, existing_data)
+                entries = self._run_in_background(
+                    VaultFormat.from_bytes, self.crypto, password, existing_data)
             except Exception as e:
                 QMessageBox.critical(
                     self.gui, "Błąd",
@@ -996,18 +1092,15 @@ class SafePadApp:
         if not source_path:
             return
 
-        source_password, ok = QInputDialog.getText(
-            self.gui, "Hasło notatki",
-            f"Podaj hasło do '{os.path.basename(source_path)}':",
-            QLineEdit.EchoMode.Password
-        )
+        source_password, ok = ask_password(self.gui, "Hasło notatki", f"Podaj hasło do '{os.path.basename(source_path)}':")
         if not ok or not source_password:
             return
 
         try:
             with open(source_path, 'rb') as f:
                 encrypted_data = f.read()
-            decrypted_data = self.crypto.decrypt_data(source_password, encrypted_data)
+            decrypted_data = self._run_in_background(
+                self.crypto.decrypt_data, source_password, encrypted_data)
             content = decrypted_data.decode('utf-8')
         except Exception as e:
             QMessageBox.critical(self.gui, "Błąd", f"Nieprawidłowe hasło lub plik uszkodzony.\n\n{e}")
@@ -1031,17 +1124,14 @@ class SafePadApp:
         file_exists = os.path.exists(vault_path)
 
         if file_exists:
-            vault_password, ok = QInputDialog.getText(
-                self.gui, "Hasło sejfu",
-                f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':",
-                QLineEdit.EchoMode.Password
-            )
+            vault_password, ok = ask_password(self.gui, "Hasło sejfu", f"Podaj hasło do sejfu '{os.path.basename(vault_path)}':")
             if not ok or not vault_password:
                 return
             try:
                 with open(vault_path, 'rb') as f:
                     existing_data = f.read()
-                entries = VaultFormat.from_bytes(self.crypto, vault_password, existing_data)
+                entries = self._run_in_background(
+                    VaultFormat.from_bytes, self.crypto, vault_password, existing_data)
             except Exception as e:
                 QMessageBox.critical(
                     self.gui, "Błąd",
@@ -1078,9 +1168,7 @@ class SafePadApp:
     def _save_current_file(self, file_path):
         try:
             if not self.password:
-                pwd, ok = QInputDialog.getText(
-                    self.gui, "Nowe hasło", "Hasło:", QLineEdit.EchoMode.Password
-                )
+                pwd, ok = ask_password(self.gui, "Nowe hasło", "Hasło:")
                 if not ok or not pwd:
                     return False
                 
@@ -1093,16 +1181,15 @@ class SafePadApp:
                     )
                     return False
                 
-                confirm, ok = QInputDialog.getText(
-                    self.gui, "Potwierdź", "Powtórz hasło:", QLineEdit.EchoMode.Password
-                )
+                confirm, ok = ask_password(self.gui, "Potwierdź", "Powtórz hasło:")
                 if not ok or pwd != confirm:
                     QMessageBox.critical(self.gui, "Błąd", "Hasła nie są identyczne!")
                     return False
                 self.password = pwd
             
             text = self.gui.text_edit.toPlainText()
-            encrypted_data = self.crypto.encrypt_data(self.password, text.encode('utf-8'))
+            encrypted_data = self._run_in_background(
+                self.crypto.encrypt_data, self.password, text.encode('utf-8'))
             
             with open(file_path, 'wb') as f:
                 f.write(encrypted_data)
@@ -1140,9 +1227,7 @@ class SafePadApp:
         if not output_path.endswith('.enc'):
             output_path += '.enc'
         
-        password, ok = QInputDialog.getText(
-            self.gui, "Hasło", "Hasło do szyfrowania folderu:", QLineEdit.EchoMode.Password
-        )
+        password, ok = ask_password(self.gui, "Hasło", "Hasło do szyfrowania folderu:")
         if not ok or not password:
             return
         
@@ -1155,9 +1240,7 @@ class SafePadApp:
             )
             return
         
-        confirm, ok = QInputDialog.getText(
-            self.gui, "Potwierdź", "Powtórz hasło:", QLineEdit.EchoMode.Password
-        )
+        confirm, ok = ask_password(self.gui, "Potwierdź", "Powtórz hasło:")
         if not ok or password != confirm:
             QMessageBox.critical(self.gui, "Błąd", "Hasła nie są identyczne!")
             return
@@ -1214,9 +1297,7 @@ class SafePadApp:
             # ._extract_zip) zostanie on nadpisany, żeby błędne hasło nie
             # zniszczyło istniejących danych użytkownika.
         
-        password, ok = QInputDialog.getText(
-            self.gui, "Hasło", "Hasło do odszyfrowania:", QLineEdit.EchoMode.Password
-        )
+        password, ok = ask_password(self.gui, "Hasło", "Hasło do odszyfrowania:")
         if not ok or not password:
             return
         
@@ -1349,12 +1430,7 @@ class SafePadApp:
     def set_backup_password(self):
         """Ustaw własne hasło do backupów sesji"""
         # Zapytaj o nowe hasło
-        new_password, ok = QInputDialog.getText(
-            self.gui, 
-            "Hasło do backupów sesji", 
-            "Wprowadź nowe hasło do backupów sesji\n(lub pozostaw puste, aby wygenerować nowe losowe hasło):", 
-            QLineEdit.EchoMode.Password
-        )
+        new_password, ok = ask_password(self.gui, "Hasło do backupów sesji", "Wprowadź nowe hasło do backupów sesji\n(lub pozostaw puste, aby wygenerować nowe losowe hasło):")
         
         if not ok:
             return False
@@ -1372,12 +1448,7 @@ class SafePadApp:
             )
             return True
         
-        confirm_password, ok = QInputDialog.getText(
-            self.gui, 
-            "Potwierdź hasło", 
-            "Powtórz hasło do backupów sesji:", 
-            QLineEdit.EchoMode.Password
-        )
+        confirm_password, ok = ask_password(self.gui, "Potwierdź hasło", "Powtórz hasło do backupów sesji:")
         
         if not ok:
             return False
@@ -1404,7 +1475,9 @@ class SafePadApp:
         return True
     
     def save_to_temp_file(self):
-        """Zapisz sesję do pliku tymczasowego"""
+        """Zapisz sesję do pliku tymczasowego (synchronicznie - używane przy wyjściu)"""
+        if self._autosave_worker is not None and self._autosave_worker.isRunning():
+            self._autosave_worker.wait()
         try:
             temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             text = self.gui.text_edit.toPlainText()

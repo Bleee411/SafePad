@@ -9,7 +9,7 @@ from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QSize, QTimer, pyqtSlot, QUrl
                           QByteArray, QBuffer, QIODevice)
 from PyQt6.QtGui import (QAction, QIcon, QPalette, QColor, QFont, QTextCursor, 
                          QPixmap, QKeySequence, QImage, QTextImageFormat, QTextDocument,
-                         QGuiApplication)
+                         QGuiApplication, QInputMethodEvent)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QTextEdit, QLabel, QToolBar, QStatusBar, QMenuBar, QMenu,
                             QDialog, QTabWidget, QFormLayout, QCheckBox, QSpinBox,
@@ -20,6 +20,93 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QComboBox, QGraphicsDropShadowEffect)
 
 from others.languages import tr, format_tr, LanguageManager, LANGUAGES
+
+_IME_DEBUG = os.environ.get("SAFEPAD_IME_DEBUG") == "1"
+
+
+def _committed_ime_event(event):
+    """Zwraca zdarzenie IME z preedit zamienionym na zatwierdzony tekst
+    albo None, jeśli zdarzenie nie zawiera preedit."""
+    if _IME_DEBUG:
+        print(f"[IME] preedit={event.preeditString()!r} commit={event.commitString()!r}")
+    preedit = event.preeditString()
+    if not preedit:
+        return None
+    fixed = QInputMethodEvent()
+    fixed.setCommitString(event.commitString() + preedit)
+    return fixed
+
+
+class SafeTextEdit(QTextEdit):
+    """QTextEdit wklejający zawsze zwykły tekst i zatwierdzający preedit IME."""
+
+    def inputMethodEvent(self, event):
+        fixed = _committed_ime_event(event)
+        super().inputMethodEvent(fixed if fixed is not None else event)
+
+    def insertFromMimeData(self, source):
+        # Tylko czysty tekst - bez HTML/formatowania ze schowka.
+        if source.hasText():
+            self.insertPlainText(source.text())
+
+
+class SafeLineEdit(QLineEdit):
+    """QLineEdit zatwierdzający preedit IME (np. wklejenie z Win+V)."""
+
+    def inputMethodEvent(self, event):
+        fixed = _committed_ime_event(event)
+        super().inputMethodEvent(fixed if fixed is not None else event)
+
+
+def _sanitize_password(text):
+    """Usuwa znaki podziału linii, które mogą trafić do hasła przy wklejeniu
+    ze schowka (np. końcowy Enter). Ręcznie wpisane hasło nie może ich
+    zawierać, więc dla wpisywanego z klawiatury hasła nic się nie zmienia."""
+    return text.replace("\r", "").replace("\n", "").replace("\u2028", "").replace("\u2029", "")
+
+
+class PasswordDialog(QDialog):
+    """Okno pytające o hasło - zamiennik QInputDialog.getText(..., Password)
+    z polem odpornym na wklejanie z Win+V."""
+
+    def __init__(self, parent, title, label):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        text_label = QLabel(label)
+        text_label.setWordWrap(True)
+        layout.addWidget(text_label)
+
+        self.edit = SafeLineEdit()
+        self.edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.edit.setFocus()
+
+    def _on_accept(self):
+        # Zatwierdź ewentualny niezatwierdzony tekst IME, zanim odczytamy hasło.
+        QGuiApplication.inputMethod().commit()
+        self.accept()
+
+    def value(self):
+        return _sanitize_password(self.edit.text())
+
+
+def ask_password(parent, title, label):
+    """Drop-in zamiennik QInputDialog.getText(parent, title, label,
+    QLineEdit.EchoMode.Password). Zwraca (hasło, ok)."""
+    dialog = PasswordDialog(parent, title, label)
+    ok = dialog.exec() == QDialog.DialogCode.Accepted
+    return (dialog.value() if ok else ""), ok
 
 
 class SettingsDialog(QDialog):
@@ -741,7 +828,7 @@ class SettingsDialog(QDialog):
         password_form = QFormLayout()
         password_form.setSpacing(10)
         
-        self.new_backup_password = QLineEdit()
+        self.new_backup_password = SafeLineEdit()
         self.new_backup_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.new_backup_password.setPlaceholderText(tr("backup_new_password").replace(":", ""))
         self.new_backup_password.setStyleSheet("""
@@ -761,7 +848,7 @@ class SettingsDialog(QDialog):
         """)
         password_form.addRow(tr("backup_new_password"), self.new_backup_password)
         
-        self.confirm_backup_password = QLineEdit()
+        self.confirm_backup_password = SafeLineEdit()
         self.confirm_backup_password.setEchoMode(QLineEdit.EchoMode.Password)
         self.confirm_backup_password.setPlaceholderText(tr("backup_confirm_password").replace(":", ""))
         self.confirm_backup_password.setStyleSheet("""
@@ -1238,7 +1325,7 @@ class SafePadGUI(QMainWindow):
         main_layout.addWidget(self.file_label)
         
         # Text edit
-        self.text_edit = QTextEdit()
+        self.text_edit = SafeTextEdit()
         self.text_edit.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.text_edit.setStyleSheet("""
             QTextEdit {
