@@ -133,6 +133,7 @@ class Registryconf:
             "password_require_special": False,
             "dark_mode": True,
             "notifications": True,
+            "restore_session": False,  # przywracanie sesji z kopii w /tmp - domyślnie wyłączone
         }
         
         loaded_settings = cls._read_config(cls.CONFIG_FILE)
@@ -253,7 +254,19 @@ class EncryptionCEO:
             raise
     
     def generate_serpent_key(self, password, salt):
-        """Generuje osobny klucz dla Serpent (256 bit)"""
+        """
+        Generuje osobny klucz dla Serpent (256 bit).
+
+        UWAGA: `salt` przekazywany tutaj (serpent_salt) jest już od początku
+        generowany niezależnym wywołaniem os.urandom(), oddzielnym od
+        aes_salt użytego w generate_key(). Poniższe XOR z 0xAA nie dodaje
+        więc żadnej realnej separacji kryptograficznej ponad to, co daje
+        sama niezależna losowość salta - jest nieszkodliwe, ale zbędne.
+        CELOWO NIE usuwamy/zmieniamy tej transformacji: zmiana sposobu
+        wyprowadzania klucza złamałaby kompatybilność wsteczną i
+        uniemożliwiła odszyfrowanie plików zaszyfrowanych wcześniejszymi
+        wersjami aplikacji.
+        """
         try:
             different_salt = bytes([b ^ 0xAA for b in salt])
             key = argon2.low_level.hash_secret_raw(
@@ -430,9 +443,24 @@ class EncryptionCEO:
         # nieodróżnialnego komunikatu błędu dla obu etapów.
         generic_error = "Nieprawidłowe hasło lub uszkodzone dane"
 
-        # Krok 1: Odszyfrowanie Serpent-CBC
+        # HOTFIX: obie derywacje kluczy (Argon2ID, kosztowne - rzędu
+        # dziesiątek/setek ms) muszą zostać wykonane PRZED jakąkolwiek próbą
+        # deszyfrowania, niezależnie od wyniku. Wcześniej generate_key()
+        # było wołane tylko wewnątrz kroku 2 (AES), więc błąd paddingu
+        # Serpent-CBC (krok 1) zwracał się natychmiast, a błąd tagu AES-GCM
+        # (krok 2) - dopiero po pełnym koszcie KDF. Sam identyczny tekst
+        # błędu nie chroni przed atakiem czasowym: różnica czasu odpowiedzi
+        # wystarcza, by odróżnić błąd paddingu CBC od błędu autentykacji GCM
+        # (klasyczny warunek ataku Vaudenay'a). Licząc oba klucze z góry,
+        # obie ścieżki błędu trwają tak samo długo.
         try:
             serpent_key = self.generate_serpent_key(password, serpent_salt)
+            aes_key = self.generate_key(password, aes_salt)
+        except Exception:
+            raise ValueError(generic_error)
+
+        # Krok 1: Odszyfrowanie Serpent-CBC
+        try:
             # Deszyfruj Serpent (zwraca IV + padded AES data)
             decrypted_combined = serpent_cbc_decrypt(serpent_key, serpent_encrypted)
 
@@ -446,10 +474,91 @@ class EncryptionCEO:
 
         # Krok 2: Odszyfrowanie AES-GCM
         try:
-            aes_key = self.generate_key(password, aes_salt)
             aesgcm = AESGCM(aes_key)
             decrypted_data = aesgcm.decrypt(aes_nonce, aes_encrypted, None)
         except Exception:
             raise ValueError(generic_error)
 
         return decrypted_data
+
+
+class VaultFormat:
+    """
+    Format kontenera "sejfu" wielu notatek (plik .spvault).
+
+    Zamiast wprowadzać nowe prymitywy kryptograficzne, sejf to po prostu
+    JEDEN blob JSON (indeks + treść wszystkich wpisów) zaszyfrowany
+    dokładnie tym samym wywołaniem, które dziś szyfruje pojedynczą notatkę:
+    EncryptionCEO.encrypt_data()/decrypt_data(). Zero nowego kodu w silniku
+    kryptograficznym do audytu - to tylko (de)serializacja.
+
+    Konsekwencja tego wyboru: odblokowanie sejfu to zawsze JEDNO wywołanie
+    Argon2id, niezależnie od liczby wpisów w środku (tak jak dziś przy
+    jednej notatce) - koszt otwarcia nie rośnie z liczbą wpisów.
+
+    Format pliku na dysku:
+        MAGIC (7 bajtów, b"SPVLT01")
+        + EncryptionCEO.encrypt_data(password, vault_json_bytes)
+
+    gdzie vault_json (PRZED zaszyfrowaniem) to:
+        {
+          "format_version": 1,
+          "entries": {
+            "<uuid4>": {
+              "title": str,
+              "content": str,
+              "created_at": iso8601 str,
+              "modified_at": iso8601 str
+            },
+            ...
+          }
+        }
+    """
+    MAGIC = b"SPVLT01"
+    FORMAT_VERSION = 1
+    # Sanity limit - notatki tekstowe nie potrzebują sejfu wielkości setek MB;
+    # ogranicza to szkodę, jaką mógłby zrobić podrzucony, spreparowany plik
+    # (np. próba wymuszenia ogromnej alokacji przy json.loads()).
+    MAX_VAULT_SIZE = 100 * 1024 * 1024  # 100 MB
+
+    @classmethod
+    def is_vault_file(cls, data: bytes) -> bool:
+        """Sprawdza nagłówek pliku bez próby deszyfrowania - pozwala odróżnić
+        sejf od zwykłej notatki .sscr i dać sensowny komunikat błędu."""
+        return data[:len(cls.MAGIC)] == cls.MAGIC
+
+    @classmethod
+    def to_bytes(cls, crypto: "EncryptionCEO", password: str, entries: dict) -> bytes:
+        """Serializuje i szyfruje cały sejf jako jeden blob."""
+        vault_json = {
+            "format_version": cls.FORMAT_VERSION,
+            "entries": entries,
+        }
+        payload = json.dumps(vault_json, ensure_ascii=False).encode('utf-8')
+        return cls.MAGIC + crypto.encrypt_data(password, payload)
+
+    @classmethod
+    def from_bytes(cls, crypto: "EncryptionCEO", password: str, data: bytes) -> dict:
+        """Odszyfrowuje sejf i zwraca słownik wpisów {id: {title, content, ...}}."""
+        if len(data) > cls.MAX_VAULT_SIZE:
+            raise ValueError("Plik sejfu jest podejrzanie duży")
+        if not cls.is_vault_file(data):
+            raise ValueError("To nie jest plik sejfu SafePad (nieprawidłowy nagłówek)")
+
+        payload = crypto.decrypt_data(password, data[len(cls.MAGIC):])
+
+        try:
+            vault_json = json.loads(payload.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            raise ValueError(f"Uszkodzona struktura sejfu: {e}")
+
+        if vault_json.get("format_version") != cls.FORMAT_VERSION:
+            raise ValueError(
+                f"Nieobsługiwana wersja formatu sejfu: {vault_json.get('format_version')!r}"
+            )
+
+        entries = vault_json.get("entries")
+        if not isinstance(entries, dict):
+            raise ValueError("Uszkodzona struktura sejfu (brak listy wpisów)")
+
+        return entries
