@@ -9,7 +9,7 @@ from PyQt6.QtCore import (Qt, QThread, pyqtSignal, QSize, QTimer, pyqtSlot, QUrl
                           QByteArray, QBuffer, QIODevice)
 from PyQt6.QtGui import (QAction, QIcon, QPalette, QColor, QFont, QTextCursor, 
                          QPixmap, QKeySequence, QImage, QTextImageFormat, QTextDocument,
-                         QGuiApplication)
+                         QGuiApplication, QInputMethodEvent)
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QTextEdit, QLabel, QToolBar, QStatusBar, QMenuBar, QMenu,
                             QDialog, QTabWidget, QFormLayout, QCheckBox, QSpinBox,
@@ -20,6 +20,56 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                             QComboBox, QGraphicsDropShadowEffect)
 
 from others.languages import tr, format_tr, LanguageManager, LANGUAGES
+
+def _sanitize_password(text):
+    """Usuwa znaki podziału linii, które mogą trafić do hasła przy wklejeniu
+    ze schowka (np. końcowy Enter). Ręcznie wpisane hasło nie może ich
+    zawierać, więc dla wpisywanego z klawiatury hasła nic się nie zmienia."""
+    return text.replace("\r", "").replace("\n", "").replace("\u2028", "").replace("\u2029", "")
+
+
+class PasswordDialog(QDialog):
+    """Okno pytające o hasło - zamiennik QInputDialog.getText(..., Password)
+    z polem odpornym na wklejanie z Win+V."""
+
+    def __init__(self, parent, title, label):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setMinimumWidth(400)
+
+        layout = QVBoxLayout(self)
+        text_label = QLabel(label)
+        text_label.setWordWrap(True)
+        layout.addWidget(text_label)
+
+        self.edit = QLineEdit()
+        self.edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.edit)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self.edit.setFocus()
+
+    def _on_accept(self):
+        # Zatwierdź ewentualny niezatwierdzony tekst IME, zanim odczytamy hasło.
+        QGuiApplication.inputMethod().commit()
+        self.accept()
+
+    def value(self):
+        return _sanitize_password(self.edit.text())
+
+
+def ask_password(parent, title, label):
+    """Drop-in zamiennik QInputDialog.getText(parent, title, label,
+    QLineEdit.EchoMode.Password). Zwraca (hasło, ok)."""
+    dialog = PasswordDialog(parent, title, label)
+    ok = dialog.exec() == QDialog.DialogCode.Accepted
+    return (dialog.value() if ok else ""), ok
 
 
 class SettingsDialog(QDialog):
@@ -577,6 +627,16 @@ class SettingsDialog(QDialog):
             }
         """)
         appearance_layout.addWidget(self.minimize_to_tray_cb)
+
+        # Przywracanie sesji: zapisuj kopię edytora i przywracaj ją przy starcie.
+        # Klucz tłumaczenia może nie istnieć w plikach językowych - wtedy tekst domyślny.
+        _rs_text = tr("appearance_restore_session")
+        if not _rs_text or _rs_text == "appearance_restore_session":
+            _rs_text = "Zapisuj i przywracaj ostatnią sesję przy starcie"
+        self.restore_session_cb = QCheckBox(_rs_text)
+        self.restore_session_cb.setChecked(self.settings.get("restore_session", False))
+        self.restore_session_cb.setStyleSheet(self.minimize_to_tray_cb.styleSheet())
+        appearance_layout.addWidget(self.restore_session_cb)
         
         layout.addWidget(appearance_group)
         layout.addStretch()
@@ -1136,6 +1196,7 @@ class SettingsDialog(QDialog):
             "dark_mode": self.dark_mode_cb.isChecked(),
             "notifications": self.notifications_cb.isChecked(),
             "minimize_to_tray": self.minimize_to_tray_cb.isChecked(),
+            "restore_session": self.restore_session_cb.isChecked(),
             "remind_later": self.settings.get("remind_later", False),
             "backup_password_changed": self.backup_password_changed,
             "language_changed": language_changed

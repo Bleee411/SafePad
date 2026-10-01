@@ -133,6 +133,7 @@ class Registryconf:
             "password_require_special": False,
             "dark_mode": True,
             "notifications": True,
+            "restore_session": False,  # przywracanie sesji z kopii w /tmp - domyślnie wyłączone
         }
         
         loaded_settings = cls._read_config(cls.CONFIG_FILE)
