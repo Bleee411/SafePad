@@ -2,7 +2,7 @@
 SafePad
 Autor: Szofer
 Licencja: MIT
-Wersja: 2.2.3-BETA-4
+Wersja: 2.2.3-RC_1
 """
 
 import sys
@@ -28,7 +28,7 @@ from others.others import secure_delete, check_password_requirements
 
 ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None) 
 
-APP_VERSION = "2.2.3-BETA-4"
+APP_VERSION = "2.2.3-RC_1"
 AUTHOR = "Szofer"
 
 # NOTE: kiedyś tutaj istniała jedna stała DEFAULT_BACKUP_PASSWORD zawierająca
@@ -600,9 +600,30 @@ class SafePadApp:
             raise state["error"]
         return state["result"]
 
+    # ------------------------- Kopia sesji (opcjonalna) -------------------------
+
+    @staticmethod
+    def _session_backup_path():
+        return os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
+
+    def _session_restore_enabled(self):
+        """Ustawienie 'restore_session' (domyślnie wyłączone)."""
+        return bool(self.settings.get("restore_session", False))
+
+    def _discard_session_backup(self):
+        """Usuwa pozostałą kopię sesji z %TEMP% (gdy funkcja jest wyłączona)."""
+        temp_file = self._session_backup_path()
+        try:
+            if os.path.exists(temp_file):
+                secure_delete(temp_file)
+        except Exception as e:
+            print(f"Nie można usunąć kopii sesji: {e}")
+
     def _autosave_tick(self):
         """Okresowy autozapis sesji w tle. Pomija cykl, gdy nic się nie
         zmieniło, trwa inna operacja albo poprzedni zapis jeszcze się liczy."""
+        if not self._session_restore_enabled():
+            return
         if self._bg_busy:
             return
         if self._autosave_worker is not None and self._autosave_worker.isRunning():
@@ -1476,6 +1497,8 @@ class SafePadApp:
     
     def save_to_temp_file(self):
         """Zapisz sesję do pliku tymczasowego (synchronicznie - używane przy wyjściu)"""
+        if not self._session_restore_enabled():
+            return
         if self._autosave_worker is not None and self._autosave_worker.isRunning():
             self._autosave_worker.wait()
         try:
@@ -1492,7 +1515,11 @@ class SafePadApp:
             print(f"Błąd zapisu sesji: {e}")
     
     def load_from_temp_file(self):
-        """Wczytaj sesję z pliku tymczasowego"""
+        """Wczytaj sesję z pliku tymczasowego (tylko gdy włączone w Ustawieniach)"""
+        if not self._session_restore_enabled():
+            # Funkcja wyłączona: nie przywracaj, a starą kopię usuń z %TEMP%.
+            self._discard_session_backup()
+            return
         try:
             temp_file = os.path.join(tempfile.gettempdir(), "safepad_session_backup.sscr")
             if os.path.exists(temp_file):
@@ -1534,6 +1561,13 @@ class SafePadApp:
         # ustawienia domyślne z __init__ ({}), niezależnie od tego, co
         # użytkownik zapisał w oknie Ustawień.
         self.gui.settings = new_settings
+
+        # Wyłączono przywracanie sesji -> usuń istniejącą kopię z %TEMP%
+        if not new_settings.get("restore_session", False):
+            if self._autosave_worker is not None and self._autosave_worker.isRunning():
+                self._autosave_worker.wait()
+            self._last_autosaved_text = None
+            self._discard_session_backup()
         
         # Aktualizuj szyfrowanie z nowym poziomem
         level = new_settings.get("encryption_level", "medium")

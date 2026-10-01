@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 
 from others.languages import tr, format_tr, LanguageManager, LANGUAGES
 
-_IME_DEBUG = os.environ.get("SAFEPAD_IME_DEBUG") == "1"
+_IME_DEBUG = os.environ.get("SAFEPAD_IME_DEBUG") == "0"
 
 
 def _committed_ime_event(event):
@@ -664,6 +664,14 @@ class SettingsDialog(QDialog):
             }
         """)
         appearance_layout.addWidget(self.minimize_to_tray_cb)
+
+        _rs_text = tr("appearance_restore_session")
+        if not _rs_text or _rs_text == "appearance_restore_session":
+            _rs_text = "Zapisuj i przywracaj ostatnią sesję przy starcie"
+        self.restore_session_cb = QCheckBox(_rs_text)
+        self.restore_session_cb.setChecked(self.settings.get("restore_session", False))
+        self.restore_session_cb.setStyleSheet(self.minimize_to_tray_cb.styleSheet())
+        appearance_layout.addWidget(self.restore_session_cb)
         
         layout.addWidget(appearance_group)
         layout.addStretch()
@@ -1223,6 +1231,7 @@ class SettingsDialog(QDialog):
             "dark_mode": self.dark_mode_cb.isChecked(),
             "notifications": self.notifications_cb.isChecked(),
             "minimize_to_tray": self.minimize_to_tray_cb.isChecked(),
+            "restore_session": self.restore_session_cb.isChecked(),
             "remind_later": self.settings.get("remind_later", False),
             "backup_password_changed": self.backup_password_changed,
             "language_changed": language_changed
@@ -1277,11 +1286,6 @@ class SettingsDialog(QDialog):
 class SafePadGUI(QMainWindow):
     """Główne okno aplikacji SafePad - tylko GUI z obsługą wielojęzyczności"""
 
-    # HOTFIX: sygnały, którymi GUI informuje warstwę aplikacji (main.py) o
-    # zdarzeniach z traya i o próbie zamknięcia okna. Wcześniej show_action
-    # i exit_action w setup_system_tray() były lokalnymi zmiennymi, do
-    # których nic nigdy nie było podłączone - kliknięcie "Pokaż"/"Zakończ"
-    # w menu traya nie robiło absolutnie nic.
     tray_show_requested = pyqtSignal()
     tray_exit_requested = pyqtSignal()
     close_requested = pyqtSignal()
@@ -1441,11 +1445,6 @@ class SafePadGUI(QMainWindow):
     
       file_menu.addSeparator()
     
-      # HOTFIX: nie ustawiamy tu skrótu Alt+F4 - system operacyjny/menedżer
-      # okien już wiąże Alt+F4 z zamknięciem okna, a powiązanie tego samego
-      # skrótu z akcją Qt mogło prowadzić do niespójnego zachowania
-      # (podwójne wywołanie / konflikt kontekstu skrótu) w zależności od
-      # platformy.
       self.exit_action = QAction(tr("menu_exit"), self)
       file_menu.addAction(self.exit_action)
     

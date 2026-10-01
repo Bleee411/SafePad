@@ -174,6 +174,9 @@ class Registryconf:
             # load_settings(), ale nigdy nie zapisywany, przez co ustawienie
             # nie przetrwało restartu aplikacji.
             winreg.SetValueEx(key, "minimize_to_tray", 0, winreg.REG_DWORD, 1 if settings.get("minimize_to_tray", False) else 0)
+
+            # Przywracanie sesji (kopia zapasowa edytora w %TEMP%) - domyślnie WYŁĄCZONE
+            winreg.SetValueEx(key, "restore_session", 0, winreg.REG_DWORD, 1 if settings.get("restore_session", False) else 0)
             
             
             winreg.CloseKey(key)
@@ -195,6 +198,7 @@ class Registryconf:
             "dark_mode": True,
             "notifications": True,
             "minimize_to_tray": False,
+            "restore_session": False,
         }
         
         try:
@@ -254,6 +258,12 @@ class Registryconf:
             try:
                 val, _ = winreg.QueryValueEx(key, "minimize_to_tray")
                 default_settings["minimize_to_tray"] = bool(val)
+            except:
+                pass
+
+            try:
+                val, _ = winreg.QueryValueEx(key, "restore_session")
+                default_settings["restore_session"] = bool(val)
             except:
                 pass
             
